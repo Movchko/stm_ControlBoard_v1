@@ -1,0 +1,19 @@
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:104:18:virtual void touchgfx::Screen::afterTransition()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:115:18:virtual void touchgfx::Screen::tearDownScreen()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:144:18:virtual void touchgfx::Screen::handleTickEvent()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:154:18:virtual void touchgfx::Screen::handleKeyEvent(uint8_t)	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:79:10:void touchgfx::TextAreaWithOneWildcard::setWildcard1(const touchgfx::Unicode::UnicodeChar*)	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:98:10:void touchgfx::TextAreaWithOneWildcard::setWildcard(const touchgfx::Unicode::UnicodeChar*)	1
+../TouchGFX/generated/gui_generated/include/gui_generated/screenmenu_jurnal_screen/ScreenMenu_jurnalViewBase.hpp:24:18:virtual void ScreenMenu_jurnalViewBase::Button_Press(uint8_t)	1
+../TouchGFX/gui/include/gui/screenmenu_jurnal_screen/ScreenMenu_jurnalView.hpp:11:13:ScreenMenu_jurnalView::~ScreenMenu_jurnalView()	1
+../TouchGFX/gui/include/gui/screenmenu_jurnal_screen/ScreenMenu_jurnalView.hpp:11:13:virtual ScreenMenu_jurnalView::~ScreenMenu_jurnalView()	1
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:12:1:ScreenMenu_jurnalView::ScreenMenu_jurnalView()	1
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:16:6:virtual void ScreenMenu_jurnalView::setupScreen()	1
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:24:6:virtual void ScreenMenu_jurnalView::tearDownScreen()	1
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:30:6:void ScreenMenu_jurnalView::renderCurrent()	6
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:59:6:bool ScreenMenu_jurnalView::loadLogical(uint32_t)	5
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:77:6:bool ScreenMenu_jurnalView::stepValid(int)	7
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:102:6:void ScreenMenu_jurnalView::refreshJournalUi()	9
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:132:6:void ScreenMenu_jurnalView::nextRecord()	2
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:139:6:void ScreenMenu_jurnalView::prevRecord()	2
+../TouchGFX/gui/src/screenmenu_jurnal_screen/ScreenMenu_jurnalView.cpp:146:6:void ScreenMenu_jurnalView::jumpToNewest()	7

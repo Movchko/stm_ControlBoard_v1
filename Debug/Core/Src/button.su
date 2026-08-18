@@ -1,0 +1,8 @@
+../Core/Src/button.c:19:13:Button_SetI2cKeysError	4	static
+../Core/Src/button.c:27:13:Button_ClearI2cKeysError	16	static
+../Core/Src/button.c:36:16:Button_ReinitI2CDriver	8	static
+../Core/Src/button.c:53:28:Button_ReinitReaderChip	4	static
+../Core/Src/button.c:57:6:Button_Init	32	static
+../Core/Src/button.c:74:6:Button_Process	32	static
+../Core/Src/button.c:118:13:Button_GetState	16	static
+../Core/Src/button.c:123:6:Button_ReadPin	32	static

@@ -1,0 +1,21 @@
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:104:18:virtual void touchgfx::Screen::afterTransition()	16	static
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:115:18:virtual void touchgfx::Screen::tearDownScreen()	16	static
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:144:18:virtual void touchgfx::Screen::handleTickEvent()	16	static
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:154:18:virtual void touchgfx::Screen::handleKeyEvent(uint8_t)	16	static
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:79:10:void touchgfx::TextAreaWithOneWildcard::setWildcard1(const touchgfx::Unicode::UnicodeChar*)	16	static
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:98:10:void touchgfx::TextAreaWithOneWildcard::setWildcard(const touchgfx::Unicode::UnicodeChar*)	16	static
+../TouchGFX/generated/gui_generated/include/gui_generated/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsViewBase.hpp:27:18:virtual void ScreenMenu_MCU_DetailsViewBase::Button_Press(uint8_t)	16	static
+../TouchGFX/gui/include/gui/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.hpp:11:13:ScreenMenu_MCU_DetailsView::~ScreenMenu_MCU_DetailsView()	16	static
+../TouchGFX/gui/include/gui/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.hpp:11:13:virtual ScreenMenu_MCU_DetailsView::~ScreenMenu_MCU_DetailsView()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:12:13:bool {anonymous}::isMcuType(uint8_t)	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:22:20:const char* {anonymous}::mcuTypeLabel(uint8_t)	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:35:13:void {anonymous}::trimZoneName(char*, size_t, const int8_t*, size_t)	32	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:53:1:ScreenMenu_MCU_DetailsView::ScreenMenu_MCU_DetailsView()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:57:6:virtual void ScreenMenu_MCU_DetailsView::setupScreen()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:65:6:virtual void ScreenMenu_MCU_DetailsView::tearDownScreen()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:71:6:void ScreenMenu_MCU_DetailsView::refreshDeviceList()	24	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:96:6:void ScreenMenu_MCU_DetailsView::selectCfgSlot(uint8_t)	24	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:110:6:void ScreenMenu_MCU_DetailsView::renderSelected()	184	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:147:6:void ScreenMenu_MCU_DetailsView::nextDevice()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:156:6:void ScreenMenu_MCU_DetailsView::prevDevice()	16	static
+../TouchGFX/gui/src/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsView.cpp:165:9:uint8_t ScreenMenu_MCU_DetailsView::getSelectedCfgSlot() const	16	static

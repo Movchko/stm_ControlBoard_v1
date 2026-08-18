@@ -1,0 +1,7 @@
+../Core/Src/Display/WEO012864A.c:32:6:Write_Command	1
+../Core/Src/Display/WEO012864A.c:45:6:Write_Data	1
+../Core/Src/Display/WEO012864A.c:63:6:Set_Addr	1
+../Core/Src/Display/WEO012864A.c:79:6:Display_Reset	1
+../Core/Src/Display/WEO012864A.c:90:6:InitDisplay	1
+../Core/Src/Display/WEO012864A.c:129:6:Display_UpdateRect	16
+../Core/Src/Display/WEO012864A.c:194:6:Display_Enable	2

@@ -1,0 +1,51 @@
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Drawable.hpp:515:10:void touchgfx::Drawable::setVisible(bool)	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Drawable.hpp:537:10:bool touchgfx::Drawable::isVisible() const	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:104:18:virtual void touchgfx::Screen::afterTransition()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:115:18:virtual void touchgfx::Screen::tearDownScreen()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:144:18:virtual void touchgfx::Screen::handleTickEvent()	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/Screen.hpp:154:18:virtual void touchgfx::Screen::handleKeyEvent(uint8_t)	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:79:10:void touchgfx::TextAreaWithOneWildcard::setWildcard1(const touchgfx::Unicode::UnicodeChar*)	1
+../Middlewares/ST/touchgfx/framework/include/touchgfx/widgets/TextAreaWithWildcard.hpp:98:10:void touchgfx::TextAreaWithOneWildcard::setWildcard(const touchgfx::Unicode::UnicodeChar*)	1
+../TouchGFX/gui/include/gui/containers/CustomContainerSollText.hpp:27:10:bool CustomContainerSollText::isMarqueeFitting() const	1
+../TouchGFX/gui/include/gui/containers/CustomContainerSollText.hpp:34:10:void CustomContainerSollText::setFinishedCallback(FinishedCallback)	1
+../TouchGFX/gui/include/gui/mainscreen_screen/mainscreenView.hpp:15:13:mainscreenView::~mainscreenView()	1
+../TouchGFX/gui/include/gui/mainscreen_screen/mainscreenView.hpp:15:13:virtual mainscreenView::~mainscreenView()	1
+D:/work/stm_workspace/device_lib/include/tick_time.h:19:23:int32_t TickDeltaMs(uint32_t, uint32_t)	1
+D:/work/stm_workspace/device_lib/include/tick_time.h:31:23:uint8_t TickAgeExpiredMs(uint32_t, uint32_t, uint32_t)	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:79:13:void {anonymous}::ui_invalidate_warn_marquee_cache()	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:86:13:bool {anonymous}::ui_fire_blocks_events()	4
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:93:13:bool {anonymous}::ui_is_start_all_hold()	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:98:16:uint8_t {anonymous}::ui_count(UiBannerMode)	5
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:109:21:{anonymous}::UiBannerMode {anonymous}::ui_highest_nonempty()	3
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:119:13:void {anonymous}::ui_clear_phase(UiBannerMode)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:125:13:void {anonymous}::ui_request_new_event(UiBannerMode, uint8_t)	3
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:136:13:void {anonymous}::trim_zone_name(char*, size_t, const int8_t*)	8
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:152:13:void {anonymous}::ui_refresh_mode_list()	7
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:173:21:{anonymous}::UiBannerMode {anonymous}::ui_desired_banner()	12
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:195:13:void {anonymous}::ui_set_warning_header_visible(mainscreenView*, bool)	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:202:13:void {anonymous}::fire_marquee_done_thunk(CustomContainerSollText*)	6
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:215:13:void {anonymous}::ui_show_desired(mainscreenView*, bool)	11
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:257:13:void {anonymous}::ui_return_to_priority(mainscreenView*)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:266:13:bool {anonymous}::ui_warning_list_equals(uint8_t, char (*)[24], char (*)[65])	5
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:281:13:bool {anonymous}::ui_attention_list_equals(uint8_t, char (*)[24], char (*)[65])	5
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:299:1:mainscreenView::mainscreenView()	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:303:6:virtual void mainscreenView::setupScreen()	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:321:6:void mainscreenView::applyMuteIcon(bool)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:330:6:void mainscreenView::applyWifiIcon(bool)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:339:6:virtual void mainscreenView::tearDownScreen()	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:350:6:void mainscreenView::setDateTime(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t)	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:361:6:void mainscreenView::fireOnMarqueeOnePassDone()	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:376:6:void mainscreenView::warningOnMarqueeOnePassDone()	4
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:392:6:void mainscreenView::fireShowCurrentZone()	23
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:476:6:void mainscreenView::warningShowCurrent()	12
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:526:6:void mainscreenView::modeShowCurrent()	6
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:562:6:virtual void mainscreenView::SetTime(uint32_t)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:567:6:virtual void mainscreenView::handleTickEvent()	8
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:602:6:void mainscreenView::uiSetWarningHeaderVisible(bool)	2
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:615:6:void mainscreenView::uiUpdateWarningHeader(uint8_t, uint8_t)	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:622:6:void mainscreenView::uiSetTopHeaderText(const char*)	3
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:637:6:void mainscreenView::uiShowNormalStatus()	1
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:649:6:void mainscreenView::uiShowStartAllHoldTimer(const char*)	3
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:663:6:void mainscreenView::updateFireStatus(bool, uint8_t, uint8_t, uint8_t, uint8_t, char (*)[65])	44
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:790:6:void mainscreenView::updateWarningStatus(bool, uint8_t, char (*)[24], char (*)[65])	24
+../TouchGFX/gui/src/mainscreen_screen/mainscreenView.cpp:839:6:void mainscreenView::handleMainNavButton(uint8_t)	22
