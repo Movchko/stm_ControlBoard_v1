@@ -1,8 +1,0 @@
-../Core/Src/rtc_cache.c:12:16:RtcCache_Bcd2Bin	16	static
-../Core/Src/rtc_cache.c:17:13:RtcCache_FillBin	8	static
-../Core/Src/rtc_cache.c:32:6:RtcCache_Refresh	8	static
-../Core/Src/rtc_cache.c:47:6:RtcCache_Tick1s	8	static
-../Core/Src/rtc_cache.c:52:6:RtcCache_IsValid	4	static
-../Core/Src/rtc_cache.c:57:19:RtcCache_Get	4	static
-../Core/Src/rtc_cache.c:62:6:RtcCache_GetBcd	24	static
-../Core/Src/rtc_cache.c:76:6:RtcCache_GetBin	24	static

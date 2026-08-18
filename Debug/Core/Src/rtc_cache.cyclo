@@ -1,8 +1,0 @@
-../Core/Src/rtc_cache.c:12:16:RtcCache_Bcd2Bin	1
-../Core/Src/rtc_cache.c:17:13:RtcCache_FillBin	1
-../Core/Src/rtc_cache.c:32:6:RtcCache_Refresh	3
-../Core/Src/rtc_cache.c:47:6:RtcCache_Tick1s	1
-../Core/Src/rtc_cache.c:52:6:RtcCache_IsValid	1
-../Core/Src/rtc_cache.c:57:19:RtcCache_Get	1
-../Core/Src/rtc_cache.c:62:6:RtcCache_GetBcd	4
-../Core/Src/rtc_cache.c:76:6:RtcCache_GetBin	4

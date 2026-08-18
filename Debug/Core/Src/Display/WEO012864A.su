@@ -1,7 +1,0 @@
-../Core/Src/Display/WEO012864A.c:32:6:Write_Command	16	static,ignoring_inline_asm
-../Core/Src/Display/WEO012864A.c:45:6:Write_Data	16	static,ignoring_inline_asm
-../Core/Src/Display/WEO012864A.c:63:6:Set_Addr	24	static
-../Core/Src/Display/WEO012864A.c:79:6:Display_Reset	8	static
-../Core/Src/Display/WEO012864A.c:90:6:InitDisplay	8	static
-../Core/Src/Display/WEO012864A.c:129:6:Display_UpdateRect	72	static
-../Core/Src/Display/WEO012864A.c:194:6:Display_Enable	16	static

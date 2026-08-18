@@ -1,3 +1,0 @@
-../Core/Src/panel_app.c:19:6:PanelApp_Init	8	static
-../Core/Src/panel_app.c:45:6:PanelApp_Timer1ms	4	static
-../Core/Src/panel_app.c:65:6:PanelApp_Timer10ms	8	static
