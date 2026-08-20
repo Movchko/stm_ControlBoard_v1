@@ -25,25 +25,17 @@ void ScreenMenu_MCU_DetailsPresenter::deactivate()
 #ifndef SIMULATOR
 void ScreenMenu_MCU_DetailsPresenter::handleButton(uint8_t but, uint8_t state)
 {
+    (void)but;
     if (state != (uint8_t)ButtonStatePress) {
         return;
     }
+    /* В режиме RS-контроля навигацию по деталям МКУ ведёт master
+     * через panel_state -> UI events. */
+}
 
-    FrontendApplication* app = static_cast<FrontendApplication*>(touchgfx::Application::getInstance());
-
-    if (but == BUT_ESC) {
-        app->gotoScreenDevicesScreenNoTransition();
-        return;
-    }
-    if (but == BUT_UP) {
-        view.prevDevice();
-        MenuUi_SetMcuDetailSlot(view.getSelectedCfgSlot());
-        return;
-    }
-    if (but == BUT_DOWN) {
-        view.nextDevice();
-        MenuUi_SetMcuDetailSlot(view.getSelectedCfgSlot());
-        return;
-    }
+void ScreenMenu_MCU_DetailsPresenter::onAppTick()
+{
+    view.refreshDeviceList();
+    view.selectCfgSlot(MenuUi_GetMcuDetailSlot());
 }
 #endif

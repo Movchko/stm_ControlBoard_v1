@@ -18,6 +18,7 @@
 #define NOTE_E6                                1319u
 #define NOTE_F6                                1397u
 #define NOTE_G6                                1568u
+#define NOTE_GS6                               1661u
 #define NOTE_A6                                1760u
 #define NOTE_B6                                1976u
 #define NOTE_C7                                2093u
@@ -84,5 +85,10 @@
 #define SOUND_TEST_ON_MS                       300u
 #define SOUND_TEST_OFF_MS                      100u
 #define SOUND_TEST_PULSES                        3u
+/* ТЕСТ: фольклорное танго в стиле «Мурки», восьмая = 170 мс, два куплета > 10 с */
+#define SOUND_TEST_EIGHTH_MS                   170u
+#define SOUND_TEST_QUARTER_MS                  (SOUND_TEST_EIGHTH_MS * 2u)
+#define SOUND_TEST_DOTTED_MS                   (SOUND_TEST_EIGHTH_MS * 3u)
+#define SOUND_TEST_HALF_MS                     (SOUND_TEST_EIGHTH_MS * 4u)
 
 #endif /* INC_SOUND_PROFILES_H_ */

@@ -57,55 +57,17 @@ void screen_devicesPresenter::deactivate()
 void screen_devicesPresenter::handleButton(uint8_t but, uint8_t state)
 
 {
-
+    (void)but;
     if (state != (uint8_t)ButtonStatePress) {
-
         return;
-
     }
+    /* В режиме RS-контроля выбор/открытие устройства обрабатывает master
+     * через panel_state -> UI events. */
+}
 
-
-
-    FrontendApplication* app = static_cast<FrontendApplication*>(touchgfx::Application::getInstance());
-
-    if (but == BUT_ESC) {
-
-        app->gotoScreenMenuScreenNoTransition();
-
-        return;
-
-    }
-
-    if (but == BUT_UP) {
-
-        view.prevDevice();
-
-        return;
-
-    }
-
-    if (but == BUT_DOWN) {
-
-        view.nextDevice();
-
-        return;
-
-    }
-
-    if (but == BUT_ENTER) {
-
-        uint8_t slot = view.getSelectedCfgSlot();
-
-        if (slot != 0xFFu) {
-
-            MenuUi_SetMcuDetailSlot(slot);
-
-            app->gotoScreenMenuMcuDetailsScreenNoTransition();
-
-        }
-
-    }
-
+void screen_devicesPresenter::onAppTick()
+{
+    view.refreshDeviceUi();
 }
 
 #endif

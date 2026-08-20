@@ -24,6 +24,8 @@ public:
 #ifndef SIMULATOR
     virtual void SetupMenuChangePos(unsigned char val);
     virtual void handleButton(uint8_t but, uint8_t state) override;
+    virtual void onAppTick() override;
+    virtual void onSoundOnChanged(bool soundOn) override;
 #endif
 private:
     ScreenMenuPresenter();

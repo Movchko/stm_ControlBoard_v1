@@ -319,6 +319,37 @@ static void Beeper_PlayNoteMs(uint16_t hz, uint16_t duration_ms)
 	Beeper_ToneStop();
 }
 
+typedef struct
+{
+	uint16_t hz;
+	uint16_t ms;
+} BeeperMelodyNote_t;
+
+/* Фольклорное танго в ля миноре, октава около резонанса KPEG116. */
+static const BeeperMelodyNote_t s_test_murka_chorus[] = {
+	{ NOTE_A6, SOUND_TEST_QUARTER_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_E7, SOUND_TEST_DOTTED_MS },
+	{ NOTE_E7, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS },
+	{ NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_QUARTER_MS },
+	{ NOTE_GS6, SOUND_TEST_QUARTER_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_DOTTED_MS },
+	{ NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS },
+	{ NOTE_A6, SOUND_TEST_QUARTER_MS }, { 0u, SOUND_TEST_EIGHTH_MS },
+	{ NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS },
+	{ NOTE_E7, SOUND_TEST_QUARTER_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS },
+	{ NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_QUARTER_MS },
+	{ NOTE_GS6, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_QUARTER_MS },
+	{ NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_HALF_MS },
+	{ 0u, SOUND_TEST_QUARTER_MS }
+};
+
+static void Beeper_PlayMelody(const BeeperMelodyNote_t *notes, uint16_t count)
+{
+	uint16_t i;
+
+	for (i = 0u; i < count; i++) {
+		Beeper_PlayNoteMs(notes[i].hz, notes[i].ms);
+	}
+}
+
 static uint8_t Beeper_IsOneShotState(BeeperState_t st)
 {
 	return (st == BEEPER_STATE_SHORT_BEEP ||
@@ -591,8 +622,8 @@ void Beeper_ButtonAcknowledge(void)
 
 void Beeper_PlayIndicationTest(void)
 {
-	uint8_t i;
 	const uint8_t saved_mute = beep_sound;
+	uint8_t pass;
 
 	if (!Beeper_IsOneShotState(beeper_state)) {
 		Beeper_CaptureResumeStateIfNeeded();
@@ -602,13 +633,9 @@ void Beeper_PlayIndicationTest(void)
 	beeper_state = BEEPER_STATE_IDLE;
 	Beeper_Off();
 
-	for (i = 0u; i < SOUND_TEST_PULSES; i++) {
-		Beeper_On();
-		HAL_Delay(SOUND_TEST_ON_MS);
-		Beeper_Off();
-		if ((uint8_t)(i + 1u) < SOUND_TEST_PULSES) {
-			HAL_Delay(SOUND_TEST_OFF_MS);
-		}
+	for (pass = 0u; pass < 2u; pass++) {
+		Beeper_PlayMelody(s_test_murka_chorus,
+			(uint16_t)(sizeof(s_test_murka_chorus) / sizeof(s_test_murka_chorus[0])));
 	}
 
 	beep_sound = saved_mute;

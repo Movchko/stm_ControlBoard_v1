@@ -53,11 +53,6 @@ void mainscreenPresenter::handleButton(uint8_t but, uint8_t state)
 
     if (but == BUT_ENTER)
     {
-        if (Fire_IsActive()) {
-            return;
-        }
-        FrontendApplication* app = static_cast<FrontendApplication*>(touchgfx::Application::getInstance());
-        app->gotoScreenMenuScreenNoTransition();
         return;
     }
 

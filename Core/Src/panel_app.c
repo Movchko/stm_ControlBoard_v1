@@ -8,6 +8,8 @@
 
 #include "rtc_cache.h"
 
+#include "rs_panel_endpoint.h"
+
 #include "device_config.h"
 
 
@@ -33,6 +35,7 @@ void PanelApp_Init(void)
 	Beeper_SoundOnOff(true);
 
 	PanelApp_WireTouchGfx();
+	PanelApp_Rs485Init();
 
 	Led_Set(LED_POWER, 1u);
 
@@ -69,6 +72,7 @@ void PanelApp_Timer10ms(void)
 	static uint8_t rtc_div;
 
 	Button_Process();
+	RsPanelEndpoint_Timer10ms();
 
 	Beeper_Process();
 
@@ -82,5 +86,10 @@ void PanelApp_Timer10ms(void)
 
 	}
 
+}
+
+void PanelApp_Rs485Init(void)
+{
+	RsPanelEndpoint_Init();
 }
 

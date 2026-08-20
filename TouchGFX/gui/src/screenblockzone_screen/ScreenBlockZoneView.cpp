@@ -5,6 +5,7 @@
 #ifndef SIMULATOR
 #include "device_config.h"
 #include "config_zone_block.h"
+#include "menu_ui.h"
 
 extern PPKYCfg PPKYConfig;
 #endif
@@ -88,7 +89,16 @@ void ScreenBlockZoneView::refreshZoneUi()
         return;
     }
 
-    if (selectedPos_ >= activeZoneCount_) {
+    const uint8_t selectedZoneIdx = MenuUi_GetBlockZoneSelected();
+    uint8_t found = 0u;
+    for (uint8_t i = 0u; i < activeZoneCount_; i++) {
+        if (activeZoneIdx_[i] == selectedZoneIdx) {
+            selectedPos_ = i;
+            found = 1u;
+            break;
+        }
+    }
+    if (found == 0u && selectedPos_ >= activeZoneCount_) {
         selectedPos_ = 0u;
     }
 

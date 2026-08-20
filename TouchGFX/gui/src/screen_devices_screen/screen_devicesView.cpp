@@ -5,6 +5,7 @@
 #ifndef SIMULATOR
 #include "app.hpp"
 #include "device_config.h"
+#include "menu_ui.h"
 
 extern PPKYCfg PPKYConfig;
 
@@ -128,6 +129,14 @@ void screen_devicesView::refreshDeviceUi()
         textArea_next_MCU.setWildcard(textArea_next_MCUBuffer);
         textArea_next_MCU.invalidate();
         return;
+    }
+
+    const uint8_t selectedSlot = MenuUi_GetMcuDetailSlot();
+    for (uint8_t i = 0u; i < deviceCount; i++) {
+        if (deviceSlots[i] == selectedSlot) {
+            selectedIndex = i;
+            break;
+        }
     }
 
     renderSelected();

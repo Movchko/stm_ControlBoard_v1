@@ -19,6 +19,7 @@ public:
     virtual ~ScreenMenu_ConnectionPresenter() {}
 #ifndef SIMULATOR
     virtual void handleButton(uint8_t but, uint8_t state) override;
+    virtual void onAppTick() override;
 #endif
 private:
     ScreenMenu_ConnectionPresenter();
@@ -28,7 +29,6 @@ private:
 #ifndef SIMULATOR
     int16_t currentIndex;
     void refreshLine();
-    void enterConfigScreen();
 #endif
 };
 

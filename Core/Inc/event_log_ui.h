@@ -15,7 +15,7 @@ extern "C" {
 
 #define EVENT_LOG_UI_HEADER_LEN  32u
 #define EVENT_LOG_UI_TITLE_LEN   24u
-#define EVENT_LOG_UI_DETAIL_LEN  128u
+#define EVENT_LOG_UI_DETAIL_LEN  384u
 
 typedef struct {
 	char header[EVENT_LOG_UI_HEADER_LEN]; /* DD.MM.YY HH:MM n/N (верхняя бегущая строка) */

@@ -1,7 +1,5 @@
 #include <gui/screenmenu_config_screen/ScreenMenu_ConfigView.hpp>
 #include <gui/screenmenu_config_screen/ScreenMenu_ConfigPresenter.hpp>
-#include <gui/common/FrontendApplication.hpp>
-#include <touchgfx/Application.hpp>
 #include "button.h"
 #include "menu_ui.h"
 #include <cstdio>
@@ -64,16 +62,11 @@ void ScreenMenu_ConfigPresenter::onAppTick()
 
 void ScreenMenu_ConfigPresenter::handleButton(uint8_t but, uint8_t state)
 {
+    (void)but;
     if (state != (uint8_t)ButtonStatePress) {
         return;
     }
-
-    FrontendApplication* app = static_cast<FrontendApplication*>(touchgfx::Application::getInstance());
-
-    if (but == BUT_ESC) {
-        Esp32_SetEnabled(0u);
-        MenuUi_SetConfigSession(0u);
-        app->gotoScreenMenuConnectionScreenNoTransition();
-    }
+    /* В режиме RS-контроля выход из config-экрана ведёт master
+     * через panel_state -> UI_EVT_BACK. */
 }
 #endif

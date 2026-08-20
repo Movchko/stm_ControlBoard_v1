@@ -19,6 +19,7 @@ public:
     virtual ~ScreenMenu_MCU_DetailsPresenter() {}
 #ifndef SIMULATOR
     virtual void handleButton(uint8_t but, uint8_t state) override;
+    virtual void onAppTick() override;
 #endif
 private:
     ScreenMenu_MCU_DetailsPresenter();

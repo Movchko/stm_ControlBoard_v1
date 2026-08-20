@@ -31,31 +31,16 @@ void ScreenBlockZonePresenter::deactivate()
 #ifndef SIMULATOR
 void ScreenBlockZonePresenter::handleButton(uint8_t but, uint8_t state)
 {
+    (void)but;
     if (state != (uint8_t)ButtonStatePress) {
         return;
     }
+    /* В режиме RS-контроля навигацию и смену режима зон ведёт master
+     * через panel_state -> UI events. */
+}
 
-    FrontendApplication *app = static_cast<FrontendApplication *>(touchgfx::Application::getInstance());
-
-    if (but == BUT_ESC) {
-        app->gotoScreenMenuScreenNoTransition();
-        return;
-    }
-    if (but == BUT_UP) {
-        view.prevActiveZone();
-        return;
-    }
-    if (but == BUT_DOWN) {
-        view.nextActiveZone();
-        return;
-    }
-    if (but == BUT_ENTER) {
-        if (view.hasActiveZones() == 0u) {
-            return;
-        }
-        view.cycleSelectedZoneMode();
-        SaveConfig();
-        ConfigIgnBlockSync_Request();
-    }
+void ScreenBlockZonePresenter::onAppTick()
+{
+    view.refreshZoneUi();
 }
 #endif
