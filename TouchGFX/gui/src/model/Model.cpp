@@ -65,11 +65,38 @@ void Model::tick()
 		modelListener->onWarningStatusChanged(warningActive, warningCount, warningBigTitles, warningDetails);
 #ifndef SIMULATOR
 		{
-			static uint8_t lastWifiLink = 0xFFu;
-			uint8_t wifiLink = EspManager_IsLinkActive();
-			if (wifiLink != lastWifiLink) {
-				lastWifiLink = wifiLink;
-				modelListener->onWifiLinkChanged(wifiLink != 0u);
+			static uint8_t lastWifiIconVis = 0xFFu;
+			static uint8_t lastSessionActive = 0xFFu;
+			static uint8_t lastLinked = 0xFFu;
+			static uint32_t lastWifiIconPollMs = 0u;
+			uint8_t sessionActive = EspManager_IsWifiSessionActive();
+			uint8_t linked = EspManager_IsLinkActive();
+			uint8_t pollNow = 0u;
+
+			if (sessionActive != lastSessionActive) {
+				lastSessionActive = sessionActive;
+				pollNow = 1u;
+			}
+			if (linked != lastLinked) {
+				lastLinked = linked;
+				pollNow = 1u;
+				lastWifiIconVis = 0xFFu;
+			}
+			if (pollNow == 0u) {
+				if (linked != 0u || sessionActive == 0u) {
+					pollNow = 1u;
+				} else if ((nowMs - lastWifiIconPollMs) >= 500u) {
+					pollNow = 1u;
+				}
+			}
+
+			if (pollNow != 0u) {
+				lastWifiIconPollMs = nowMs;
+				uint8_t wifiIconVis = EspManager_IsWifiIconVisible(nowMs);
+				if (wifiIconVis != lastWifiIconVis) {
+					lastWifiIconVis = wifiIconVis;
+					modelListener->onWifiLinkChanged(wifiIconVis != 0u);
+				}
 			}
 		}
 #endif

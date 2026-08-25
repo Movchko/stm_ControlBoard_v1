@@ -20,6 +20,8 @@ uint8_t EspManager_IsOnline(void);
 uint8_t EspManager_IsWifiEnabled(void);
 uint8_t EspManager_IsHostConnected(void);
 uint8_t EspManager_IsLinkActive(void);
+uint8_t EspManager_IsWifiSessionActive(void);
+uint8_t EspManager_IsWifiIconVisible(uint32_t now_ms);
 
 #ifdef __cplusplus
 }

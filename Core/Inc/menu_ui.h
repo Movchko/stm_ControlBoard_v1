@@ -40,7 +40,7 @@ uint8_t MenuUi_GetConnectionSelected(void);
 void MenuUi_SetWifiBlocked(uint8_t blocked);
 uint8_t MenuUi_IsWifiBlocked(void);
 void MenuConfig_SetRemoteStatus(MenuCfgState state, uint8_t percent);
-void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected);
+void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected, uint8_t session_active);
 
 /* Remote-controlled menu selection.
  * Panel renders highlight based on MENU_LIST{selected,n_items}.

@@ -97,6 +97,7 @@ static uint8_t s_cfg_percent;
 static uint8_t s_esp_enabled;
 static uint8_t s_esp_online;
 static uint8_t s_esp_host_connected;
+static uint8_t s_esp_wifi_session;
 
 void MenuUi_SetConfigSession(uint8_t active) { s_menu_cfg = active; }
 uint8_t MenuUi_IsConfigSessionActive(void) { return s_menu_cfg; }
@@ -119,11 +120,12 @@ void MenuConfig_SetRemoteStatus(MenuCfgState state, uint8_t percent)
     s_cfg_state = state;
     s_cfg_percent = percent;
 }
-void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected)
+void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected, uint8_t session_active)
 {
     s_esp_enabled = (esp_enabled != 0u) ? 1u : 0u;
     s_esp_online = (online != 0u) ? 1u : 0u;
     s_esp_host_connected = (host_connected != 0u) ? 1u : 0u;
+    s_esp_wifi_session = (session_active != 0u) ? 1u : 0u;
 }
 void MenuUi_SetMcuDetailSlot(uint8_t cfg_slot) { s_mcu_slot = cfg_slot; }
 uint8_t MenuUi_GetMcuDetailSlot(void) { return s_mcu_slot; }
@@ -165,6 +167,18 @@ uint8_t EspManager_IsOnline(void) { return s_esp_online; }
 uint8_t EspManager_IsWifiEnabled(void) { return s_esp_enabled; }
 uint8_t EspManager_IsHostConnected(void) { return s_esp_host_connected; }
 uint8_t EspManager_IsLinkActive(void) { return (uint8_t)(s_esp_enabled != 0u && s_esp_online != 0u && s_esp_host_connected != 0u); }
+uint8_t EspManager_IsWifiSessionActive(void) { return (uint8_t)(s_esp_wifi_session != 0u || s_esp_host_connected != 0u); }
+uint8_t EspManager_IsWifiIconVisible(uint32_t now_ms)
+{
+    if (EspManager_IsWifiSessionActive() == 0u) {
+        return 0u;
+    }
+    if (EspManager_IsLinkActive() != 0u) {
+        return 1u;
+    }
+    /* 1 Гц: 500 мс вкл / 500 мс выкл */
+    return (uint8_t)(((now_ms / 500u) & 1u) == 0u);
+}
 
 static uint8_t s_pending_zone_mode_ui_change = 0u;
 static uint8_t s_pending_zone_mode_ui_change_idx = 0u;

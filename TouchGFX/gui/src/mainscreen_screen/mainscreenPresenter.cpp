@@ -6,6 +6,7 @@
 #ifndef SIMULATOR
 #include "button.h"
 #include "fire.h"
+#include "main.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
 #endif
@@ -23,7 +24,7 @@ void mainscreenPresenter::activate()
     /* Один раз при входе на экран — без последующего опроса в tick. */
     if (model) {
         view.applyMuteIcon(model->getSoundOn());
-        view.applyWifiIcon(EspManager_IsLinkActive() != 0u);
+        view.applyWifiIcon(EspManager_IsWifiIconVisible(HAL_GetTick()) != 0u);
     }
 #endif
 }
