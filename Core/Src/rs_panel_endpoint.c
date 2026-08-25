@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "beeper.h"
+#include "boot_panel.h"
 #include "button.h"
 #include "event_log_ui.h"
 #include "led.h"
@@ -48,6 +49,8 @@ extern void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
                                        uint16_t items_len);
 
 static RsPanelEndpoint g_endpoint;
+static uint32_t g_activity_accum_ms = 0u;
+static uint32_t g_uptime_sec = 0u;
 
 static uint16_t rs_put_u16le(uint8_t *dst, uint16_t value)
 {
@@ -727,6 +730,31 @@ static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t se
     (void)RsBus_SendFrame(&endpoint->bus, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL, payload, payload_len);
 }
 
+static void rs_send_activity(RsPanelEndpoint *endpoint)
+{
+    uint8_t payload[RS_PANEL_ACTIVITY_PAYLOAD_SIZE];
+    uint16_t pos = 0u;
+
+    if (endpoint == 0) {
+        return;
+    }
+    payload[pos++] = (uint8_t)RS_BUS_DEV_TYPE_PANEL_APP;
+    pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.fw_ver));
+    pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.hw_id));
+    payload[pos++] = endpoint->state.caps.status;
+    payload[pos++] = (uint8_t)(g_uptime_sec & 0xFFu);
+    payload[pos++] = (uint8_t)((g_uptime_sec >> 8) & 0xFFu);
+    payload[pos++] = (uint8_t)((g_uptime_sec >> 16) & 0xFFu);
+    payload[pos++] = (uint8_t)((g_uptime_sec >> 24) & 0xFFu);
+    (void)RsBus_SendFrame(&endpoint->bus,
+                          endpoint->panel_addr,
+                          endpoint->next_tx_seq++,
+                          RS_BUS_FLAG_DIR,
+                          RS_PANEL_RSP_ACTIVITY,
+                          payload,
+                          pos);
+}
+
 static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
 {
     RsPanelEndpoint *endpoint = (RsPanelEndpoint *)ctx;
@@ -872,6 +900,13 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_LOGO, RS_PANEL_UI_ACTION_REPLACE);
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         break;
+    case RS_PANEL_CMD_ENTER_BOOTLOADER:
+        /* ACK уходит до reset; ПО/ППКУ прокидывает кадр как есть. */
+        rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
+        PanelBoot_SetUpdateRequest(endpoint->panel_addr);
+        HAL_Delay(20);
+        NVIC_SystemReset();
+        break;
     default:
         break;
     }
@@ -885,6 +920,7 @@ void RsPanelEndpoint_Init(void)
 
     memset(&g_endpoint, 0, sizeof(g_endpoint));
     g_endpoint.panel_addr = 0x01u;
+    PanelBoot_SetRsAddr(g_endpoint.panel_addr);
     g_endpoint.next_tx_seq = 1u;
     PanelState_Init(&g_endpoint.state);
     EventLogUi_FormatEmpty(&lines);
@@ -899,6 +935,12 @@ void RsPanelEndpoint_Init(void)
 void RsPanelEndpoint_Timer10ms(void)
 {
     PanelState_SampleButtons(&g_endpoint.state);
+    g_activity_accum_ms += 10u;
+    if (g_activity_accum_ms >= 1000u) {
+        g_activity_accum_ms = 0u;
+        g_uptime_sec++;
+        rs_send_activity(&g_endpoint);
+    }
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)

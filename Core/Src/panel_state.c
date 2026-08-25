@@ -266,6 +266,8 @@ void PanelState_Init(PanelStateContext *ctx)
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
+    ctx->caps.fw_ver = 1u;
+    ctx->caps.hw_id = 1u;
     ctx->caps.disp_w = 128u;
     ctx->caps.disp_h = 64u;
     ctx->caps.journal_lines = 1u;

@@ -12,6 +12,8 @@
 
 #include "device_config.h"
 
+#include "backend.h"
+
 
 
 extern PPKYCfg PPKYConfig;
@@ -51,6 +53,7 @@ void PanelApp_Timer1ms(void)
 
 	static uint8_t div10;
 
+	(void)div10;
 
 /*
 	if (++div10 >= 10u) {
@@ -70,6 +73,8 @@ void PanelApp_Timer10ms(void)
 {
 
 	static uint8_t rtc_div;
+	static uint16_t s_app_wd_ticks = 0u;
+	static uint8_t s_app_wd_done = 0u;
 
 	Button_Process();
 	RsPanelEndpoint_Timer10ms();
@@ -77,6 +82,16 @@ void PanelApp_Timer10ms(void)
 	Beeper_Process();
 
 	Led_Process();
+
+	/* 300 * 10 мс = 3 с */
+	if (s_app_wd_done == 0u) {
+		if (s_app_wd_ticks < 300u) {
+			s_app_wd_ticks++;
+		} else {
+			s_app_wd_done = 1u;
+			App_WriteProgramWatchdog();
+		}
+	}
 
 	if (++rtc_div >= 100u) {
 
