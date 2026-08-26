@@ -8,10 +8,13 @@ extern "C" {
 #endif
 
 /* Контракт flash/SRAM между бутлоадером v2 и приложением панели.
- * Дублируется в MCU_bootloader_v2/Core/Inc/boot_panel.h — держать синхронно. */
+ * Дублируется в MCU_bootloader_v2/Core/Inc/boot_panel.h — держать синхронно.
+ *
+ * Boot: 40 КБ (сектора 0..4), код линкуется в LENGTH=40K-16; последние 16 байт — boot WD.
+ * App WD: 16 байт сразу перед футером (тот же сектор, что футер) — стирается вместе с образом.
+ */
+#define PANEL_FLASH_BASE            0x08000000u
 #define PANEL_BOOTLOADER_SIZE       0xA000u          /* 40 КБ, сектора 0..4 */
-#define PANEL_META_SECTOR_ADDR      0x0800A000u      /* сектор 5 */
-#define PANEL_META_SECTOR_SIZE      0x2000u
 #define PANEL_FOOTER_SECTOR_ADDR    0x0800C000u      /* сектор 6 */
 #define PANEL_APP_START_ADDR        0x0800E000u      /* сектор 7 */
 #define PANEL_APP_SIZE_SECTORS      28u
@@ -21,8 +24,10 @@ extern "C" {
 #define PANEL_FLASH_FOOTER_SZ       64u
 #define PANEL_APP_FOOTER_ADDR       (PANEL_APP_START_ADDR - PANEL_FLASH_FOOTER_SZ)
 
-#define PANEL_BOOT_KEY_ADDR         (PANEL_META_SECTOR_ADDR + PANEL_META_SECTOR_SIZE - 16u)
-#define PANEL_APP_WD_ADDR           (PANEL_META_SECTOR_ADDR + PANEL_META_SECTOR_SIZE - 32u)
+/* Boot WD: конец области бутлоадера (линкер: FLASH LENGTH = 40K - 16). */
+#define PANEL_BOOT_KEY_ADDR         (PANEL_FLASH_BASE + PANEL_BOOTLOADER_SIZE - 16u)
+/* App WD: перед футером, в секторе футера/образа (EraseApp стирает). */
+#define PANEL_APP_WD_ADDR           (PANEL_APP_FOOTER_ADDR - 16u)
 
 #define PANEL_WATCHDOG_MAGIC        0xAABBCCDDu
 

@@ -2,7 +2,8 @@
 #include "boot_panel.h"
 
 /**
- * Сильная реализация для панели: записать app-watchdog один раз.
+ * Сильная реализация для панели: записать app-watchdog один раз
+ * (перед футером, PANEL_APP_WD_ADDR). Стирается вместе с образом при обновлении.
  * Вызывается из PanelApp_Timer10ms через 3 с после старта.
  */
 void App_WriteProgramWatchdog(void)
