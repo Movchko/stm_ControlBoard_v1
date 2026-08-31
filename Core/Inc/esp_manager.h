@@ -21,6 +21,9 @@ uint8_t EspManager_IsWifiEnabled(void);
 uint8_t EspManager_IsHostConnected(void);
 uint8_t EspManager_IsLinkActive(void);
 uint8_t EspManager_IsWifiSessionActive(void);
+/** Активна сессия WiFi (ожидание/подключение). */
+uint8_t EspManager_IsUserWifiOn(void);
+/** Видимость значка WiFi с учётом мигания (2 Гц) до TCP-подключения. */
 uint8_t EspManager_IsWifiIconVisible(uint32_t now_ms);
 
 #ifdef __cplusplus

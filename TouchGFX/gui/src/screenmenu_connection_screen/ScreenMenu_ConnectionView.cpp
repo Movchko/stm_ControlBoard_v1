@@ -38,12 +38,18 @@ void ScreenMenu_ConnectionView::initStatusLineText()
 }
 #endif
 
-void ScreenMenu_ConnectionView::updateStatusLine(int16_t selectedIndex, bool wifiBlocked)
+void ScreenMenu_ConnectionView::updateStatusLine(int16_t selectedIndex, bool wifiBlocked, bool wifiOn, bool rs485On)
 {
 #ifndef SIMULATOR
     char line[24] = {0};
-    if (selectedIndex == 0 && wifiBlocked) {
-        (void)std::snprintf(line, sizeof(line), "БЛОК.");
+    if (selectedIndex == 0) {
+        if (wifiBlocked) {
+            (void)std::snprintf(line, sizeof(line), "БЛОК.");
+        } else {
+            (void)std::snprintf(line, sizeof(line), "%s", wifiOn ? "Вкл" : "Выкл");
+        }
+    } else {
+        (void)std::snprintf(line, sizeof(line), "%s", rs485On ? "Вкл" : "Выкл");
     }
     Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(line), statusLineBuffer, STATUS_LINE_SIZE);
     statusLineBuffer[STATUS_LINE_SIZE - 1] = 0;
@@ -51,6 +57,8 @@ void ScreenMenu_ConnectionView::updateStatusLine(int16_t selectedIndex, bool wif
 #else
     (void)selectedIndex;
     (void)wifiBlocked;
+    (void)wifiOn;
+    (void)rs485On;
 #endif
 }
 

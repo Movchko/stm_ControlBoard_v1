@@ -10,6 +10,7 @@
 #include "button.h"
 #include "fire.h"
 #include "led.h"
+#include "menu_ui.h"
 #include "tick_time.h"
 
 extern PPKYCfg PPKYConfig;
@@ -62,6 +63,7 @@ UiBannerMode s_banner_mode = BANNER_NONE;
 UiBannerMode s_pending_banner = BANNER_NONE;
 uint32_t s_pending_from = 0u;
 char s_top_header_text[24] = {0};
+char s_config_overlay_text[32] = {0};
 uint8_t s_manual_browse = 0u;
 uint32_t s_nav_last_press_ms = 0u;
 uint8_t s_fire_mode = 0u;
@@ -567,6 +569,19 @@ void mainscreenView::SetTime(uint32_t time)
 void mainscreenView::handleTickEvent()
 {
 	mainscreenViewBase::handleTickEvent();
+#ifndef SIMULATOR
+	static uint8_t s_cfg_overlay_was = 0u;
+	if (MenuUi_IsConfigOverlayActive()) {
+		s_cfg_overlay_was = 1u;
+		return;
+	}
+	if (s_cfg_overlay_was != 0u) {
+		s_cfg_overlay_was = 0u;
+		/* После УСПЕХ/оверлея force: иначе BANNER_NONE==BANNER_NONE и НОРМА не рисуется. */
+		ui_show_desired(this, true);
+		return;
+	}
+#endif
 	const uint32_t now = HAL_GetTick();
 	ui_refresh_mode_list();
 
@@ -636,8 +651,29 @@ void mainscreenView::uiSetTopHeaderText(const char* text)
 
 void mainscreenView::uiShowNormalStatus()
 {
+	s_config_overlay_text[0] = '\0';
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("НОРМА"), textArea1Buffer, TEXTAREA1_SIZE);
+	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
+	textArea1.setWildcard(textArea1Buffer);
+	textArea1.invalidate();
+	CustomContainerSrollText.setText("");
+	ui_invalidate_warn_marquee_cache();
+	s_banner_mode = BANNER_NONE;
+}
+
+void mainscreenView::uiShowConfigOverlay(const char* center_text)
+{
+	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "...";
+	if (std::strncmp(s_config_overlay_text, txt, sizeof(s_config_overlay_text)) == 0) {
+		return;
+	}
+	std::strncpy(s_config_overlay_text, txt, sizeof(s_config_overlay_text) - 1u);
+	s_config_overlay_text[sizeof(s_config_overlay_text) - 1u] = '\0';
+
+	ui_set_warning_header_visible(this, false);
+	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
+	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(txt), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 	textArea1.setWildcard(textArea1Buffer);
 	textArea1.invalidate();

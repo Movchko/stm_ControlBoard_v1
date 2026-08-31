@@ -41,6 +41,7 @@ public:
 					char (*details)[ZONE_NAME_SIZE + 1]) override;
     virtual void onSoundOnChanged(bool soundOn) override;
     virtual void onWifiLinkChanged(bool active) override;
+    virtual void onAppTick() override;
 #endif
 private:
     mainscreenPresenter();

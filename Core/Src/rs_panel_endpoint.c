@@ -520,7 +520,7 @@ static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, u
         }
         break;
     case RS_PANEL_UI_DATA_CONNECTION_STATUS:
-        /* [selected_idx][wifi_blocked][esp_enabled][online][host_connected][session?] */
+        /* [selected_idx][wifi_blocked][esp_enabled][online][host_connected][session?][wifi_on?][rs485_on?] */
         if (len >= 6u) {
             MenuUi_SetConnectionSelected(payload[1]);
             MenuUi_SetWifiBlocked(payload[2]);
@@ -528,6 +528,9 @@ static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, u
             {
                 uint8_t session = (len >= 7u) ? payload[6] : ((payload[5] != 0u) ? 1u : 0u);
                 PanelEspManager_SetRemoteStatus(payload[3], payload[4], payload[5], session);
+            }
+            if (len >= 9u) {
+                PanelConnectionCache_SetRemoteStatus(payload[7], payload[8]);
             }
         }
         break;

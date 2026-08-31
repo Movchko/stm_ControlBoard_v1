@@ -16,9 +16,14 @@ typedef enum {
 
 void MenuUi_SetConfigSession(uint8_t active);
 uint8_t MenuUi_IsConfigSessionActive(void);
+uint8_t MenuUi_IsConfigOverlayActive(void);
 
 void MenuUi_SetMainScreenActive(uint8_t active);
 uint8_t MenuUi_IsMainScreenActive(void);
+
+void MenuUi_SetMenuIndex(int16_t index);
+int16_t MenuUi_GetMenuIndex(void);
+void MenuUi_ResetMenuIndex(void);
 
 void Esp32_SetEnabled(uint8_t enabled);
 uint8_t Esp32_IsEnabled(void);
@@ -26,7 +31,9 @@ uint8_t Esp32_IsEnabled(void);
 void MenuConfig_Reset(void);
 void MenuConfig_OnWordReceived(uint16_t word_num);
 void MenuConfig_OnSaveCompleted(void);
+void MenuConfig_OnApplyStarted(void);
 void MenuConfig_OnApplySuccess(void);
+void MenuConfig_Process1ms(uint32_t now_ms);
 
 MenuCfgState MenuConfig_GetState(void);
 uint8_t MenuConfig_GetPercent(void);
@@ -41,6 +48,7 @@ void MenuUi_SetWifiBlocked(uint8_t blocked);
 uint8_t MenuUi_IsWifiBlocked(void);
 void MenuConfig_SetRemoteStatus(MenuCfgState state, uint8_t percent);
 void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected, uint8_t session_active);
+void PanelConnectionCache_SetRemoteStatus(uint8_t user_wifi_on, uint8_t rs485_on);
 
 /* Remote-controlled menu selection.
  * Panel renders highlight based on MENU_LIST{selected,n_items}.

@@ -15,7 +15,7 @@ public:
 
     int16_t getSelectedIndex() const;
     void setSelectedIndex(int16_t index);
-    void updateStatusLine(int16_t selectedIndex, bool wifiBlocked);
+    void updateStatusLine(int16_t selectedIndex, bool wifiBlocked, bool wifiOn, bool rs485On);
 
 #ifndef SIMULATOR
     virtual void scrollWheel1UpdateItem(mainmenu& item, int16_t itemIndex) override;

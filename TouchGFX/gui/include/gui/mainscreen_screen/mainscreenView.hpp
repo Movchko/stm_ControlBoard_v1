@@ -50,6 +50,8 @@ public:
     void uiShowNormalStatus();
     /** Удержание ПУСК ОБЩИЙ: таймер 3с по центру (важнее «НОРМА»). */
     void uiShowStartAllHoldTimer(const char* center_text);
+    /** Оверлей конфигурации по центру главного экрана. */
+    void uiShowConfigOverlay(const char* center_text);
     /** imageMute в top_bar: показать при выключенном звуке. */
     void applyMuteIcon(bool soundOn);
     /** imageWifi в top_bar: показать при активном TCP-подключении хоста. */

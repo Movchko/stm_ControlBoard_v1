@@ -13,6 +13,8 @@
 #include "device_config.h"
 
 #include "backend.h"
+#include "menu_ui.h"
+#include "main.h"
 
 
 
@@ -48,22 +50,8 @@ void PanelApp_Init(void)
 
 
 void PanelApp_Timer1ms(void)
-
 {
-
-	static uint8_t div10;
-
-	(void)div10;
-
-/*
-	if (++div10 >= 10u) {
-
-		div10 = 0u;
-
-		PanelApp_Timer10ms();
-
-	}
-*/
+	MenuConfig_Process1ms(HAL_GetTick());
 }
 
 

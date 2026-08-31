@@ -9,6 +9,7 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
+#include <cstdio>
 #endif
 
 mainscreenPresenter::mainscreenPresenter(mainscreenView& v)
@@ -21,6 +22,7 @@ void mainscreenPresenter::activate()
 {
 #ifndef SIMULATOR
     MenuUi_SetMainScreenActive(1u);
+    MenuUi_ResetMenuIndex();
     /* Один раз при входе на экран — без последующего опроса в tick. */
     if (model) {
         view.applyMuteIcon(model->getSoundOn());
@@ -82,5 +84,40 @@ void mainscreenPresenter::onSoundOnChanged(bool soundOn)
 void mainscreenPresenter::onWifiLinkChanged(bool active)
 {
 	view.applyWifiIcon(active);
+}
+
+void mainscreenPresenter::onAppTick()
+{
+    static uint8_t was_overlay = 0u;
+    const uint8_t overlay = MenuUi_IsConfigOverlayActive();
+
+    if (overlay == 0u) {
+        if (was_overlay != 0u) {
+            was_overlay = 0u;
+            /* Оверлей снял сессию: принудительно вернуть НОРМА/баннеры. */
+            view.uiShowNormalStatus();
+        }
+        return;
+    }
+    was_overlay = 1u;
+
+    MenuCfgState st = MenuConfig_GetState();
+    uint8_t pct = MenuConfig_GetPercent();
+    char line[32] = {0};
+
+    switch (st) {
+    case MENU_CFG_STATE_RECEIVING:
+        (void)std::snprintf(line, sizeof(line), "СОХР %u%%", (unsigned)pct);
+        break;
+    case MENU_CFG_STATE_APPLYING:
+        (void)std::snprintf(line, sizeof(line), "КОНФ. %u%%", (unsigned)pct);
+        break;
+    case MENU_CFG_STATE_SUCCESS:
+        (void)std::snprintf(line, sizeof(line), "УСПЕШНО");
+        break;
+    default:
+        break;
+    }
+    view.uiShowConfigOverlay(line);
 }
 #endif

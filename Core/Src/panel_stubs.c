@@ -7,6 +7,7 @@
 #include "event_log_ui.h"
 #include "event_log_reader.h"
 #include "device_config.h"
+#include "main.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -94,31 +95,85 @@ static uint8_t s_menu_sound_on;
 static uint8_t s_menu_sound_blocked;
 static MenuCfgState s_cfg_state = MENU_CFG_STATE_IDLE;
 static uint8_t s_cfg_percent;
+static uint32_t s_cfg_success_from_ms;
 static uint8_t s_esp_enabled;
 static uint8_t s_esp_online;
 static uint8_t s_esp_host_connected;
 static uint8_t s_esp_wifi_session;
+static uint8_t s_user_wifi_on;
 
-void MenuUi_SetConfigSession(uint8_t active) { s_menu_cfg = active; }
+#define MENU_CFG_SUCCESS_HOLD_MS 5000u
+
+void MenuUi_SetConfigSession(uint8_t active)
+{
+    s_menu_cfg = (active != 0u) ? 1u : 0u;
+    if (s_menu_cfg == 0u) {
+        s_cfg_state = MENU_CFG_STATE_IDLE;
+        s_cfg_percent = 0u;
+        s_cfg_success_from_ms = 0u;
+    }
+}
 uint8_t MenuUi_IsConfigSessionActive(void) { return s_menu_cfg; }
+uint8_t MenuUi_IsConfigOverlayActive(void)
+{
+    return (s_menu_cfg != 0u && s_cfg_state != MENU_CFG_STATE_IDLE) ? 1u : 0u;
+}
 void MenuUi_SetMainScreenActive(uint8_t active) { s_menu_main = active; }
 uint8_t MenuUi_IsMainScreenActive(void) { return s_menu_main; }
+
+void MenuUi_SetMenuIndex(int16_t index)
+{
+    if (index < 0) {
+        index = 0;
+    }
+    s_menu_selected = (uint16_t)index;
+}
+int16_t MenuUi_GetMenuIndex(void) { return (int16_t)s_menu_selected; }
+void MenuUi_ResetMenuIndex(void) { MenuUi_SetMenuSelected(0u); }
+
 void Esp32_SetEnabled(uint8_t enabled) { s_esp_enabled = (enabled != 0u) ? 1u : 0u; }
 uint8_t Esp32_IsEnabled(void) { return s_esp_enabled; }
 void MenuConfig_Reset(void)
 {
     s_cfg_state = MENU_CFG_STATE_RECEIVING;
     s_cfg_percent = 0u;
+    s_cfg_success_from_ms = 0u;
 }
 void MenuConfig_OnWordReceived(uint16_t word_num) { (void)word_num; }
-void MenuConfig_OnSaveCompleted(void) { s_cfg_state = MENU_CFG_STATE_APPLYING; }
-void MenuConfig_OnApplySuccess(void) { s_cfg_state = MENU_CFG_STATE_SUCCESS; s_cfg_percent = 100u; }
+void MenuConfig_OnSaveCompleted(void) { (void)0; }
+void MenuConfig_OnApplyStarted(void) { (void)0; }
+void MenuConfig_OnApplySuccess(void)
+{
+    s_cfg_state = MENU_CFG_STATE_SUCCESS;
+    s_cfg_percent = 100u;
+    s_cfg_success_from_ms = HAL_GetTick();
+}
 MenuCfgState MenuConfig_GetState(void) { return s_cfg_state; }
 uint8_t MenuConfig_GetPercent(void) { return s_cfg_percent; }
 void MenuConfig_SetRemoteStatus(MenuCfgState state, uint8_t percent)
 {
     s_cfg_state = state;
     s_cfg_percent = percent;
+    if (state == MENU_CFG_STATE_SUCCESS) {
+        s_cfg_success_from_ms = HAL_GetTick();
+    } else if (state == MENU_CFG_STATE_IDLE) {
+        s_cfg_success_from_ms = 0u;
+    }
+    if (state != MENU_CFG_STATE_IDLE) {
+        s_menu_cfg = 1u;
+    } else {
+        s_menu_cfg = 0u;
+    }
+}
+void MenuConfig_Process1ms(uint32_t now_ms)
+{
+    if (s_menu_cfg == 0u || s_cfg_state != MENU_CFG_STATE_SUCCESS) {
+        return;
+    }
+    if (s_cfg_success_from_ms != 0u &&
+        (int32_t)(now_ms - s_cfg_success_from_ms) >= (int32_t)MENU_CFG_SUCCESS_HOLD_MS) {
+        MenuUi_SetConfigSession(0u);
+    }
 }
 void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected, uint8_t session_active)
 {
@@ -126,6 +181,11 @@ void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_
     s_esp_online = (online != 0u) ? 1u : 0u;
     s_esp_host_connected = (host_connected != 0u) ? 1u : 0u;
     s_esp_wifi_session = (session_active != 0u) ? 1u : 0u;
+}
+void PanelConnectionCache_SetRemoteStatus(uint8_t user_wifi_on, uint8_t rs485_on)
+{
+    s_user_wifi_on = (user_wifi_on != 0u) ? 1u : 0u;
+    PPKYConfig.rs485_on = (rs485_on != 0u) ? 1u : 0u;
 }
 void MenuUi_SetMcuDetailSlot(uint8_t cfg_slot) { s_mcu_slot = cfg_slot; }
 uint8_t MenuUi_GetMcuDetailSlot(void) { return s_mcu_slot; }
@@ -168,6 +228,7 @@ uint8_t EspManager_IsWifiEnabled(void) { return s_esp_enabled; }
 uint8_t EspManager_IsHostConnected(void) { return s_esp_host_connected; }
 uint8_t EspManager_IsLinkActive(void) { return (uint8_t)(s_esp_enabled != 0u && s_esp_online != 0u && s_esp_host_connected != 0u); }
 uint8_t EspManager_IsWifiSessionActive(void) { return (uint8_t)(s_esp_wifi_session != 0u || s_esp_host_connected != 0u); }
+uint8_t EspManager_IsUserWifiOn(void) { return s_user_wifi_on; }
 uint8_t EspManager_IsWifiIconVisible(uint32_t now_ms)
 {
     if (EspManager_IsWifiSessionActive() == 0u) {
