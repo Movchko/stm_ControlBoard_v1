@@ -27,6 +27,16 @@ void mainscreenPresenter::activate()
     if (model) {
         view.applyMuteIcon(model->getSoundOn());
         view.applyWifiIcon(EspManager_IsWifiIconVisible(HAL_GetTick()) != 0u);
+        view.updateFireStatus(model->getFireActive(),
+                              model->getFireMode(),
+                              0xFFu,
+                              model->getFireRemaining(),
+                              model->getFireZoneNameCount(),
+                              model->getFireZoneNames());
+        view.updateWarningStatus(model->getWarningActive(),
+                                 model->getWarningCount(),
+                                 const_cast<char (*)[WARNING_TITLE_LEN]>(model->getWarningBigTitles()),
+                                 const_cast<char (*)[ZONE_NAME_SIZE + 1]>(model->getWarningDetails()));
     }
 #endif
 }
@@ -89,13 +99,31 @@ void mainscreenPresenter::onWifiLinkChanged(bool active)
 void mainscreenPresenter::onAppTick()
 {
     static uint8_t was_overlay = 0u;
+    static uint32_t last_sync_ms = 0u;
     const uint8_t overlay = MenuUi_IsConfigOverlayActive();
 
     if (overlay == 0u) {
         if (was_overlay != 0u) {
             was_overlay = 0u;
-            /* Оверлей снял сессию: принудительно вернуть НОРМА/баннеры. */
-            view.uiShowNormalStatus();
+            last_sync_ms = 0u;
+        }
+        /* Страховка раз в 200 мс: если WARN уже в Model, а view после logo/setupScreen
+         * остался на «НОРМА». Бегущая строка не сбрасывается (same_marquee в View). */
+        if (model && (model->getWarningActive() || model->getFireActive())) {
+            const uint32_t now = HAL_GetTick();
+            if (last_sync_ms == 0u || (now - last_sync_ms) >= 200u) {
+                last_sync_ms = now;
+                view.updateFireStatus(model->getFireActive(),
+                                      model->getFireMode(),
+                                      0xFFu,
+                                      model->getFireRemaining(),
+                                      model->getFireZoneNameCount(),
+                                      model->getFireZoneNames());
+                view.updateWarningStatus(model->getWarningActive(),
+                                         model->getWarningCount(),
+                                         const_cast<char (*)[WARNING_TITLE_LEN]>(model->getWarningBigTitles()),
+                                         const_cast<char (*)[ZONE_NAME_SIZE + 1]>(model->getWarningDetails()));
+            }
         }
         return;
     }

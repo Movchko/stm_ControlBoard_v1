@@ -23,6 +23,7 @@
 #include "button.h"
 #include "fire.h"
 #include "menu_ui.h"
+#include "rs_panel_endpoint.h"
 #endif
 
 using namespace touchgfx;
@@ -50,6 +51,7 @@ void FrontendApplication::handleTickEvent()
         }
         gotomainscreenScreenNoTransition();
         FrontendApplicationBase::handleTickEvent();
+        RsPanelEndpoint_ProcessDeferredUi();
         return;
     }
 
@@ -67,6 +69,11 @@ void FrontendApplication::handleTickEvent()
 #endif
 
     FrontendApplicationBase::handleTickEvent();
+
+#ifndef SIMULATOR
+    /* После logo→MAIN: setupScreen/activate уже выполнены, view живой. */
+    RsPanelEndpoint_ProcessDeferredUi();
+#endif
 }
 
 void FrontendApplication::gotoScreenMenuScreenNoTransition()

@@ -56,6 +56,7 @@ void DebugMon_Handler(void);
 void PendSV_Handler(void);
 void SysTick_Handler(void);
 void GPDMA1_Channel1_IRQHandler(void);
+void UART4_IRQHandler(void);
 void ADC1_IRQHandler(void);
 void DAC1_IRQHandler(void);
 void TIM1_UP_IRQHandler(void);

@@ -63,6 +63,7 @@ extern I2C_HandleTypeDef hi2c2;
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim6;
+extern UART_HandleTypeDef huart4;
 extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
 /* USER CODE BEGIN EV */
 
@@ -218,6 +219,20 @@ void GPDMA1_Channel1_IRQHandler(void)
   /* USER CODE BEGIN GPDMA1_Channel1_IRQn 1 */
 
   /* USER CODE END GPDMA1_Channel1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles UART4 global interrupt.
+  */
+void UART4_IRQHandler(void)
+{
+  /* USER CODE BEGIN UART4_IRQn 0 */
+
+  /* USER CODE END UART4_IRQn 0 */
+  HAL_UART_IRQHandler(&huart4);
+  /* USER CODE BEGIN UART4_IRQn 1 */
+
+  /* USER CODE END UART4_IRQn 1 */
 }
 
 /**

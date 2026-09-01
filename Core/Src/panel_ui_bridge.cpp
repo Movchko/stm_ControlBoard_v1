@@ -1,6 +1,7 @@
 #include "panel_ui_bridge.h"
 
 #include <gui/common/FrontendHeap.hpp>
+#include <gui/model/ModelListener.hpp>
 #include "rs_panel_protocol.h"
 
 extern "C" {
@@ -30,6 +31,10 @@ extern "C" void PanelUiBridge_GotoScreen(uint16_t screen_id, uint8_t action)
         panel_ui_app().gotoscreen_logoScreenNoTransition();
         break;
     case RS_PANEL_SCREEN_MAIN:
+        if (MenuUi_IsMainScreenActive() != 0u) {
+            MenuUi_SetConfigSession(0u);
+            break;
+        }
         MenuUi_SetMainScreenActive(1u);
         MenuUi_SetConfigSession(0u);
         panel_ui_app().gotomainscreenScreenNoTransition();
@@ -81,17 +86,29 @@ extern "C" void PanelUiBridge_SetFireStatus(uint8_t active,
                                             uint8_t n_zones,
                                             char (*zone_names)[ZONE_NAME_SIZE + 1])
 {
-    FrontendHeap::getInstance().model.setFireStatusFromApp(active != 0u,
-                                                           mode,
-                                                           0xFFu,
-                                                           remaining_s,
-                                                           n_zones,
-                                                           zone_names);
+    Model& model = FrontendHeap::getInstance().model;
+    model.setFireStatusFromApp(active != 0u,
+                                mode,
+                                0xFFu,
+                                remaining_s,
+                                n_zones,
+                                zone_names);
 
     /* TouchGFX uses Fire_IsActive()/Fire_IsStartAllHoldActive() for priority
      * and forced main-screen switch. На панели реальную пожарную логику
      * заменяем этими RS-driven флагами. */
     Fire_NotifyUiStatus(active, mode, remaining_s, n_zones);
+    if (MenuUi_IsMainScreenActive() != 0u) {
+        ModelListener* listener = model.getModelListener();
+        if (listener != nullptr) {
+            listener->onFireStatusChanged(model.getFireActive(),
+                                         model.getFireMode(),
+                                         0xFFu,
+                                         model.getFireRemaining(),
+                                         model.getFireZoneNameCount(),
+                                         model.getFireZoneNames());
+        }
+    }
 }
 
 extern "C" void PanelUiBridge_SetWarningStatus(uint8_t active,
@@ -99,10 +116,20 @@ extern "C" void PanelUiBridge_SetWarningStatus(uint8_t active,
                                                char (*titles)[24],
                                                char (*details)[ZONE_NAME_SIZE + 1])
 {
-    FrontendHeap::getInstance().model.setWarningStatusFromApp(active != 0u,
-                                                              n_items,
-                                                              titles,
-                                                              details);
+    Model& model = FrontendHeap::getInstance().model;
+    model.setWarningStatusFromApp(active != 0u,
+                                  n_items,
+                                  titles,
+                                  details);
+    if (MenuUi_IsMainScreenActive() != 0u) {
+        ModelListener* listener = model.getModelListener();
+        if (listener != nullptr) {
+            listener->onWarningStatusChanged(model.getWarningActive(),
+                                             model.getWarningCount(),
+                                             const_cast<char (*)[WARNING_TITLE_LEN]>(model.getWarningBigTitles()),
+                                             const_cast<char (*)[ZONE_NAME_SIZE + 1]>(model.getWarningDetails()));
+        }
+    }
 }
 
 extern "C" void PanelUiBridge_StartIndicationTest(void)

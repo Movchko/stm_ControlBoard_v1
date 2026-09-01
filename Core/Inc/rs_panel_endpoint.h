@@ -23,6 +23,7 @@ typedef struct {
 
 void RsPanelEndpoint_Init(void);
 void RsPanelEndpoint_Timer10ms(void);
+void RsPanelEndpoint_ProcessDeferredUi(void);
 
 #ifdef __cplusplus
 }

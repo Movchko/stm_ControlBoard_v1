@@ -47,6 +47,17 @@ public:
     /* Обновление предупреждений (неисправностей) для главного экрана. */
     void setWarningStatusFromApp(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
 				 char (*details)[ZONE_NAME_SIZE + 1]);
+
+    bool getWarningActive() const { return warningActive; }
+    uint8_t getWarningCount() const { return warningCount; }
+    const char (*getWarningBigTitles() const)[WARNING_TITLE_LEN] { return warningBigTitles; }
+    const char (*getWarningDetails() const)[ZONE_NAME_SIZE + 1] { return warningDetails; }
+
+    bool getFireActive() const { return fireActive; }
+    uint8_t getFireMode() const { return fireMode; }
+    uint8_t getFireRemaining() const { return fireRemaining; }
+    uint8_t getFireZoneNameCount() const { return fireZoneNameCount; }
+    char (*getFireZoneNames())[ZONE_NAME_SIZE + 1] { return fireZoneNames; }
 #endif
 
 protected:

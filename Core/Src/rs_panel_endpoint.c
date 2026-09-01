@@ -11,6 +11,7 @@
 #include "menu_ui.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
+#include "rs_panel_debug.h"
 
 extern PPKYCfg PPKYConfig;
 extern UART_HandleTypeDef huart4;
@@ -51,6 +52,133 @@ extern void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
 static RsPanelEndpoint g_endpoint;
 static uint32_t g_activity_accum_ms = 0u;
 static uint32_t g_uptime_sec = 0u;
+
+typedef struct {
+    uint8_t active;
+    uint8_t mode;
+    uint8_t remaining_s;
+    uint8_t n_zones;
+    char zone_names[16][ZONE_NAME_SIZE + 1];
+} DeferredFireUi;
+
+typedef struct {
+    uint8_t active;
+    uint8_t n_items;
+    char titles[PANEL_STATE_MAX_WARN_ITEMS][24];
+    char details[PANEL_STATE_MAX_WARN_ITEMS][ZONE_NAME_SIZE + 1];
+} DeferredWarnUi;
+
+static DeferredFireUi s_deferred_fire;
+static DeferredWarnUi s_deferred_warn;
+static volatile uint8_t s_fire_pending;
+static volatile uint8_t s_warn_pending;
+
+typedef struct {
+    uint16_t screen_id;
+    uint8_t action;
+} DeferredNavUi;
+
+static DeferredNavUi s_deferred_nav;
+static volatile uint8_t s_nav_pending;
+
+static void rs_queue_nav(uint16_t screen_id, uint8_t action)
+{
+    s_deferred_nav.screen_id = screen_id;
+    s_deferred_nav.action = action;
+    s_nav_pending = 1u;
+}
+
+static void rs_queue_fire_ui(uint8_t active,
+                             uint8_t mode,
+                             uint8_t remaining_s,
+                             uint8_t n_zones,
+                             char (*zone_names)[ZONE_NAME_SIZE + 1])
+{
+    uint8_t i;
+
+    s_deferred_fire.active = active;
+    s_deferred_fire.mode = mode;
+    s_deferred_fire.remaining_s = remaining_s;
+    if (n_zones > 16u) {
+        n_zones = 16u;
+    }
+    s_deferred_fire.n_zones = n_zones;
+    memset(s_deferred_fire.zone_names, 0, sizeof(s_deferred_fire.zone_names));
+    if (zone_names != 0) {
+        for (i = 0u; i < n_zones; i++) {
+            memcpy(s_deferred_fire.zone_names[i], zone_names[i], ZONE_NAME_SIZE);
+            s_deferred_fire.zone_names[i][ZONE_NAME_SIZE] = '\0';
+        }
+    }
+    s_fire_pending = 1u;
+    g_rs_panel_dbg.ui_fire_pending = 1u;
+}
+
+static void rs_queue_warn_ui(uint8_t active,
+                             uint8_t n_items,
+                             char (*titles)[24],
+                             char (*details)[ZONE_NAME_SIZE + 1])
+{
+    uint8_t i;
+
+    if (n_items > PANEL_STATE_MAX_WARN_ITEMS) {
+        n_items = PANEL_STATE_MAX_WARN_ITEMS;
+    }
+    s_deferred_warn.active = active;
+    s_deferred_warn.n_items = n_items;
+    memset(s_deferred_warn.titles, 0, sizeof(s_deferred_warn.titles));
+    memset(s_deferred_warn.details, 0, sizeof(s_deferred_warn.details));
+    if (titles != 0 && details != 0) {
+        for (i = 0u; i < n_items; i++) {
+            memcpy(s_deferred_warn.titles[i], titles[i], sizeof(s_deferred_warn.titles[i]) - 1u);
+            memcpy(s_deferred_warn.details[i], details[i], sizeof(s_deferred_warn.details[i]) - 1u);
+        }
+    }
+    s_warn_pending = 1u;
+    g_rs_panel_dbg.ui_warn_pending = 1u;
+}
+
+void RsPanelEndpoint_ProcessDeferredUi(void)
+{
+    if (s_nav_pending != 0u) {
+        s_nav_pending = 0u;
+        PanelUiBridge_GotoScreen(s_deferred_nav.screen_id, s_deferred_nav.action);
+    }
+    if (s_warn_pending != 0u) {
+        s_warn_pending = 0u;
+        g_rs_panel_dbg.ui_warn_pending = 0u;
+        PanelUiBridge_SetWarningStatus(s_deferred_warn.active,
+                                       s_deferred_warn.n_items,
+                                       s_deferred_warn.titles,
+                                       s_deferred_warn.details);
+    }
+    if (s_fire_pending != 0u) {
+        s_fire_pending = 0u;
+        g_rs_panel_dbg.ui_fire_pending = 0u;
+        PanelUiBridge_SetFireStatus(s_deferred_fire.active,
+                                    s_deferred_fire.mode,
+                                    s_deferred_fire.remaining_s,
+                                    s_deferred_fire.n_zones,
+                                    s_deferred_fire.zone_names);
+    }
+}
+
+static void rs_bus_send_frame(RsPanelEndpoint *endpoint,
+                              uint8_t addr,
+                              uint8_t seq,
+                              uint8_t flags,
+                              uint8_t cmd,
+                              const uint8_t *payload,
+                              uint16_t payload_len)
+{
+    HAL_StatusTypeDef st;
+
+    if (endpoint == 0) {
+        return;
+    }
+    st = RsBus_SendFrame(&endpoint->bus, addr, seq, flags, cmd, payload, payload_len);
+    RsPanelDebug_OnTxFrame(cmd, (st == HAL_OK) ? 1u : 0u);
+}
 
 static uint16_t rs_put_u16le(uint8_t *dst, uint16_t value)
 {
@@ -433,7 +561,7 @@ static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload,
         pos = (uint16_t)(pos + payload[pos - 1u]);
     }
 
-    PanelUiBridge_SetFireStatus(active, mode, remaining_s, n_zones, zone_names);
+    rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names);
 }
 
 static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload, uint16_t len)
@@ -492,10 +620,14 @@ static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload,
         pos = (uint16_t)(pos + payload[pos - 1u]);
     }
 
-    PanelUiBridge_SetWarningStatus((count != 0u) ? 1u : 0u,
-                                   n_items,
-                                   state->warning_titles,
-                                   state->warning_details);
+    g_rs_panel_dbg.last_warn_active = ((count != 0u) && (i != 0u)) ? 1u : 0u;
+    g_rs_panel_dbg.last_warn_n_items = i;
+    g_rs_panel_dbg.host_warn_data_rx++;
+
+    rs_queue_warn_ui(g_rs_panel_dbg.last_warn_active,
+                     i,
+                     state->warning_titles,
+                     state->warning_details);
 }
 
 static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, uint16_t len)
@@ -503,6 +635,8 @@ static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, u
     if (state == 0 || payload == 0 || len == 0u) {
         return;
     }
+
+    g_rs_panel_dbg.last_ui_data_sub_id = payload[0];
 
     switch (payload[0]) {
     case RS_PANEL_UI_DATA_MAIN_FIRE:
@@ -709,14 +843,14 @@ static void rs_send_caps(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq)
     if (payload_len == 0u) {
         return;
     }
-    (void)RsBus_SendFrame(&endpoint->bus, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_CAPS, payload, payload_len);
+    (void)rs_bus_send_frame(endpoint, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_CAPS, payload, payload_len);
 }
 
 static void rs_send_ack(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq, uint8_t ack_seq)
 {
     uint8_t payload[1];
     payload[0] = ack_seq;
-    (void)RsBus_SendFrame(&endpoint->bus, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_ACK, payload, sizeof(payload));
+    rs_bus_send_frame(endpoint, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_ACK, payload, sizeof(payload));
 }
 
 static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq)
@@ -730,7 +864,8 @@ static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t se
     if (payload_len == 0u) {
         return;
     }
-    (void)RsBus_SendFrame(&endpoint->bus, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL, payload, payload_len);
+    RsPanelDebug_OnPollRsp(rsp.ui_evt_count, rsp.evt_count);
+    rs_bus_send_frame(endpoint, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL, payload, payload_len);
 }
 
 static void rs_send_activity(RsPanelEndpoint *endpoint)
@@ -749,13 +884,13 @@ static void rs_send_activity(RsPanelEndpoint *endpoint)
     payload[pos++] = (uint8_t)((g_uptime_sec >> 8) & 0xFFu);
     payload[pos++] = (uint8_t)((g_uptime_sec >> 16) & 0xFFu);
     payload[pos++] = (uint8_t)((g_uptime_sec >> 24) & 0xFFu);
-    (void)RsBus_SendFrame(&endpoint->bus,
-                          endpoint->panel_addr,
-                          endpoint->next_tx_seq++,
-                          RS_BUS_FLAG_DIR,
-                          RS_PANEL_RSP_ACTIVITY,
-                          payload,
-                          pos);
+    rs_bus_send_frame(endpoint,
+                      endpoint->panel_addr,
+                      endpoint->next_tx_seq++,
+                      RS_BUS_FLAG_DIR,
+                      RS_PANEL_RSP_ACTIVITY,
+                      payload,
+                      pos);
 }
 
 static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
@@ -766,11 +901,16 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         return;
     }
     if ((frame->flags & RS_BUS_FLAG_DIR) != 0u) {
+        RsPanelDebug_OnHostFrameIgnored();
         return;
     }
     if (frame->addr != RS_BUS_BROADCAST_ADDR && frame->addr != endpoint->panel_addr) {
+        RsPanelDebug_OnHostFrameIgnored();
         return;
     }
+
+    RsPanelDebug_OnHostFrame(frame->cmd, frame->seq, frame->addr);
+    g_rs_panel_dbg.current_screen = endpoint->state.current_screen;
 
     endpoint->state.last_host_seq = frame->seq;
 
@@ -868,7 +1008,7 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
             RsPanelUiNavCmd nav_cmd;
             if (rs_decode_ui_nav_cmd(frame->payload, frame->payload_len, &nav_cmd)) {
                 endpoint->state.current_screen = nav_cmd.screen_id;
-                PanelUiBridge_GotoScreen(nav_cmd.screen_id, nav_cmd.action);
+                rs_queue_nav(nav_cmd.screen_id, nav_cmd.action);
             }
         }
         if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
@@ -917,27 +1057,24 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
 
 void RsPanelEndpoint_Init(void)
 {
-    EventLogUiLines_t lines;
-    char titles[1][24];
-    char details[1][ZONE_NAME_SIZE + 1];
-
     memset(&g_endpoint, 0, sizeof(g_endpoint));
+    RsPanelDebug_Reset();
     g_endpoint.panel_addr = 0x01u;
     PanelBoot_SetRsAddr(g_endpoint.panel_addr);
     g_endpoint.next_tx_seq = 1u;
     PanelState_Init(&g_endpoint.state);
-    EventLogUi_FormatEmpty(&lines);
-    memset(titles, 0, sizeof(titles));
-    memset(details, 0, sizeof(details));
-    memcpy(titles[0], lines.title, sizeof(titles[0]) - 1u);
-    memcpy(details[0], lines.detail, sizeof(details[0]) - 1u);
-    PanelUiBridge_SetWarningStatus(0u, 1u, titles, details);
     RsBus_Init(&g_endpoint.bus, &huart4, BRP_485_EN_GPIO_Port, BRP_485_EN_Pin, rs_endpoint_on_frame, &g_endpoint);
 }
 
 void RsPanelEndpoint_Timer10ms(void)
 {
+    /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
+     * иначе WARN попадает в уничтожаемый view, а setupScreen снова рисует «НОРМА». */
     PanelState_SampleButtons(&g_endpoint.state);
+    g_rs_panel_dbg.current_screen = g_endpoint.state.current_screen;
+    g_rs_panel_dbg.pending_ui_count = g_endpoint.state.pending_ui_count;
+    g_rs_panel_dbg.pending_btn_count = g_endpoint.state.pending_btn_count;
+    RsPanelDebug_Timer10ms(HAL_GetTick());
     g_activity_accum_ms += 10u;
     if (g_activity_accum_ms >= 1000u) {
         g_activity_accum_ms = 0u;
@@ -951,6 +1088,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     if (huart != &huart4 || size == 0u) {
         return;
     }
+    RsPanelDebug_OnRxDma(size);
     RsBus_ProcessRxBytes(&g_endpoint.bus, g_endpoint.bus.rx_dma_buf, size);
     (void)HAL_UARTEx_ReceiveToIdle_DMA(&huart4,
                                        g_endpoint.bus.rx_dma_buf,

@@ -49,7 +49,7 @@ void Fire_NotifyUiStatus(uint8_t ui_active, uint8_t mode, uint8_t remaining_s, u
 	 * В UI обновлениях это состояние проявляется:
 	 * - hold-idle: mode==1 && n_zones==0
 	 * - hold при активном сценарии: mode==0 (ui_mode остаётся 0 в ветке all_hold_active<3s) */
-	s_start_all_hold_active = (is_hold_idle != 0u || mode == 0u) ? 1u : 0u;
+	s_start_all_hold_active = is_hold_idle;
 }
 
 /* Конфиг хранится на ППКУ 2; на панели запись в Flash не делается. */

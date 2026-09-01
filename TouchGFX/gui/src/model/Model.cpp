@@ -59,11 +59,6 @@ void Model::tick()
 			}
 		}
 
-		/* Проксируем актуальный статус пожара на активный экран каждый tick */
-		modelListener->onFireStatusChanged(fireActive, fireMode, fireZone, fireRemaining,
-						     fireZoneNameCount, fireZoneNames);
-		modelListener->onWarningStatusChanged(warningActive, warningCount, warningBigTitles, warningDetails);
-#ifndef SIMULATOR
 		{
 			static uint8_t lastWifiIconVis = 0xFFu;
 			static uint8_t lastSessionActive = 0xFFu;
@@ -99,7 +94,6 @@ void Model::tick()
 				}
 			}
 		}
-#endif
 		modelListener->onAppTick();
 	}
 
@@ -139,11 +133,17 @@ void Model::setWarningStatusFromApp(bool active, uint8_t nItems, char (*bigTitle
 				    char (*details)[ZONE_NAME_SIZE + 1])
 {
 	warningActive = active;
+	if (!active) {
+		warningCount = 0u;
+		std::memset(warningBigTitles, 0, sizeof(warningBigTitles));
+		std::memset(warningDetails, 0, sizeof(warningDetails));
+		return;
+	}
 	if (nItems > 16u) {
 		nItems = 16u;
 	}
 	warningCount = nItems;
-	if (!active || nItems == 0u) {
+	if (nItems == 0u) {
 		std::memset(warningBigTitles, 0, sizeof(warningBigTitles));
 		std::memset(warningDetails, 0, sizeof(warningDetails));
 		return;

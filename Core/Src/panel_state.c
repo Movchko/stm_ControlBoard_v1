@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "menu_ui.h"
+#include "rs_panel_debug.h"
 
 static void panel_state_push_btn(PanelStateContext *ctx, uint8_t type, uint8_t state, uint8_t level)
 {
@@ -25,6 +26,7 @@ static void panel_state_push_ui(PanelStateContext *ctx, uint8_t evt_type, uint16
     ctx->pending_ui[ctx->pending_ui_count].p1 = p1;
     ctx->pending_ui[ctx->pending_ui_count].p2 = p2;
     ctx->pending_ui_count++;
+    RsPanelDebug_OnUiEventQueued(evt_type, p1);
 }
 
 static uint8_t panel_state_btn_type(uint8_t local_button)
@@ -331,6 +333,11 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
         return;
     }
 
+    /* TouchGFX сам переходит logo→main; RS current_screen обновляется только по UI_NAV. */
+    if (MenuUi_IsMainScreenActive() != 0u && ctx->current_screen != RS_PANEL_SCREEN_MAIN) {
+        ctx->current_screen = RS_PANEL_SCREEN_MAIN;
+    }
+
     ctx->caps.status = 0x02u;
     for (i = 0u; i < (uint8_t)(sizeof(local_buttons) / sizeof(local_buttons[0])); i++) {
         btn = local_buttons[i];
@@ -349,8 +356,10 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
             uint8_t route_block_zone_ui = panel_state_is_remote_block_zone_button(ctx->current_screen, btn);
             uint8_t route_connection_ui = panel_state_is_remote_connection_button(ctx->current_screen, btn);
             if (state == (uint8_t)ButtonStatePress) {
+                const uint8_t on_main_screen =
+                    (ctx->current_screen == RS_PANEL_SCREEN_MAIN || MenuUi_IsMainScreenActive() != 0u);
                 const uint8_t is_main_enter =
-                    (ctx->current_screen == RS_PANEL_SCREEN_MAIN && btn == BUT_ENTER && ctx->fire_active == 0u);
+                    (on_main_screen != 0u && btn == BUT_ENTER && ctx->fire_active == 0u);
                 const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(ctx->current_screen, btn);
 
                 if (is_main_enter != 0u) {

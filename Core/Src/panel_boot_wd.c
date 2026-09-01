@@ -8,6 +8,10 @@
  */
 void App_WriteProgramWatchdog(void)
 {
+	//TODO:: DELETE
+	return;
+
+
 	uint32_t *val = (uint32_t *)PANEL_APP_WD_ADDR;
 	uint32_t quad_word[4];
 

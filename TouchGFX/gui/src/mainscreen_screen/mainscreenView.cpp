@@ -85,6 +85,32 @@ static void ui_invalidate_warn_marquee_cache(void)
 	s_warn_marquee_text[0] = '\0';
 }
 
+static void ui_reset_banner_state(void)
+{
+	s_fn_n = 0u;
+	s_an_n = 0u;
+	s_wn_n = 0u;
+	s_mn_n = 0u;
+	memset(s_cur, 0, sizeof(s_cur));
+	memset(s_phase, 0, sizeof(s_phase));
+	memset(s_hold_from, 0, sizeof(s_hold_from));
+	s_banner_mode = BANNER_NONE;
+	s_pending_banner = BANNER_NONE;
+	s_pending_from = 0u;
+	s_top_header_text[0] = '\0';
+	s_config_overlay_text[0] = '\0';
+	s_manual_browse = 0u;
+	s_nav_last_press_ms = 0u;
+	s_fire_mode = 0u;
+	s_fire_active = 0u;
+	s_fire_center_text[0] = '\0';
+	s_start_all_hold_shown = 0u;
+#if GOST_MODE
+	s_gost_force_fire_redraw = 0u;
+#endif
+	ui_invalidate_warn_marquee_cache();
+}
+
 static bool ui_fire_blocks_events(void)
 {
 	return (s_fire_active != 0u && (s_fire_mode == 1u || s_fire_mode == 2u));
@@ -240,6 +266,9 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 	}
 #endif
 	if (!force && desired == s_banner_mode) {
+		if (desired == BANNER_NONE) {
+			ui_set_warning_header_visible(view, false);
+		}
 		return;
 	}
 	if (desired == BANNER_FIRE) {
@@ -309,11 +338,9 @@ void mainscreenView::setupScreen()
 #ifndef SIMULATOR
 	g_main_view = this;
 	CustomContainerSrollText.setFinishedCallback(fire_marquee_done_thunk);
-	s_banner_mode = BANNER_NONE;
-	s_manual_browse = 0u;
-	s_nav_last_press_ms = 0u;
-	memset(s_phase, 0, sizeof(s_phase));
-	memset(s_hold_from, 0, sizeof(s_hold_from));
+	ui_reset_banner_state();
+	textAreatime_top_bar.cancelMoveAnimation();
+	textAreatime_top_bar.setPosition(0, 0, 128, 15);
 	Fire_UiSetManualSelection(0u, 0u);
 	ui_refresh_mode_list();
 	uiShowNormalStatus();
@@ -616,7 +643,14 @@ void mainscreenView::handleTickEvent()
 
 void mainscreenView::uiSetWarningHeaderVisible(bool visible)
 {
+	if (visible) {
+		textAreatime_top_bar.cancelMoveAnimation();
+		textAreatime_top_bar.setPosition(0, 0, 128, 15);
+	}
 	if (textAreatime_top_bar.isVisible() == visible) {
+		if (visible) {
+			textAreatime_top_bar.invalidate();
+		}
 		return;
 	}
 	customContainerTopBar1.setVisible(true);
@@ -652,6 +686,7 @@ void mainscreenView::uiSetTopHeaderText(const char* text)
 void mainscreenView::uiShowNormalStatus()
 {
 	s_config_overlay_text[0] = '\0';
+	ui_set_warning_header_visible(this, false);
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("НОРМА"), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
@@ -869,7 +904,7 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 	if (attention_first_changed) ui_request_new_event(BANNER_ATTENTION, 0u);
 	if (fault_first_changed) ui_request_new_event(BANNER_FAULT, 0u);
 	/* Списки обновлены даже при пожаре; выбор дисплея делает ui_desired_banner(). */
-	ui_show_desired(this, attention_changed || fault_changed);
+	ui_show_desired(this, true);
 }
 
 void mainscreenView::handleMainNavButton(uint8_t but)
