@@ -182,6 +182,7 @@ int main(void)
 	  if ((cur_tick - led_tick) >= 1000u) {
 		  led_tick = cur_tick;
 		  LED_TOGGLE;
+		  //Beeper_LongBeep1300ms();
 	  }
 
 	  if ((cur_tick - app_tick) >= 10u) {

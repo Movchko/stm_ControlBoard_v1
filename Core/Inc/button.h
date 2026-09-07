@@ -16,7 +16,7 @@
 #define BUT_UP 		1
 #define BUT_DOWN	2
 #define BUT_ESC		0
-#define BUT_FORCE	4
+#define BUT_FORCE	4 // в этой версии нет
 #define BUT_STOP	5
 #define BUT_FIRE 	6
 

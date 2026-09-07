@@ -8,10 +8,6 @@
  */
 void App_WriteProgramWatchdog(void)
 {
-	//TODO:: DELETE
-	return;
-
-
 	uint32_t *val = (uint32_t *)PANEL_APP_WD_ADDR;
 	uint32_t quad_word[4];
 
@@ -24,7 +20,10 @@ void App_WriteProgramWatchdog(void)
 	quad_word[2] = 0xFFFFFFFFu;
 	quad_word[3] = 0xFFFFFFFFu;
 
+	(void)HAL_ICACHE_Disable();
 	HAL_FLASH_Unlock();
 	(void)HAL_FLASH_Program(FLASH_TYPEPROGRAM_QUADWORD, PANEL_APP_WD_ADDR, (uint32_t)quad_word);
 	HAL_FLASH_Lock();
+	(void)HAL_ICACHE_Invalidate();
+	(void)HAL_ICACHE_Enable();
 }
