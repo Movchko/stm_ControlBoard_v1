@@ -330,8 +330,9 @@ typedef struct {
 	uint32_t rec_idx;
 	uint32_t ts;
 	uint16_t code;
-	char short_text[49]; /* max 48 bytes + '\0' */
-	char full_text[EVENT_LOG_UI_DETAIL_LEN + 1u];
+	char header[EVENT_LOG_UI_HEADER_LEN];
+	char title[EVENT_LOG_UI_TITLE_LEN];
+	char detail[EVENT_LOG_UI_DETAIL_LEN];
 } PanelJournalEntry_t;
 
 static PanelJournalEntry_t g_journal_entries[PANEL_JOURNAL_MAX_ITEMS];
@@ -492,10 +493,43 @@ static uint32_t panel_rs_get_u32le(const uint8_t *src)
 	       ((uint32_t)src[3] << 24);
 }
 
-/* JOURNAL_LIST:
- * total u32, selected_idx u32, window_first u32, n_items u8, then n_items x:
- *   rec_idx u32, ts u32, code u16, text_len u8 + text[text_len]
+/* JOURNAL_LIST items[]:
+ * rec_idx u32, ts u32, code u16,
+ * header_len u8 + header[], title_len u8 + title[], detail_len u8 + detail[]
  */
+static uint16_t panel_rs_get_counted_str(const uint8_t *items,
+					 uint16_t items_len,
+					 uint16_t *pos,
+					 char *dst,
+					 uint8_t dst_size)
+{
+	uint8_t n;
+	uint8_t copy;
+
+	if (dst == 0 || dst_size == 0u || pos == 0 || items == 0) {
+		return 0u;
+	}
+	if ((uint16_t)(*pos + 1u) > items_len) {
+		dst[0] = '\0';
+		return 0u;
+	}
+	n = items[(*pos)++];
+	if ((uint16_t)(*pos + n) > items_len) {
+		dst[0] = '\0';
+		return 0u;
+	}
+	copy = n;
+	if (copy >= dst_size) {
+		copy = (uint8_t)(dst_size - 1u);
+	}
+	if (copy != 0u) {
+		memcpy(dst, &items[*pos], copy);
+	}
+	dst[copy] = '\0';
+	*pos = (uint16_t)(*pos + n);
+	return 1u;
+}
+
 void PanelJournalCache_SetList(uint32_t total,
 				uint32_t selected_idx,
 				uint32_t window_first,
@@ -522,10 +556,8 @@ void PanelJournalCache_SetList(uint32_t total,
 
 	for (i = 0u; i < n_items; i++) {
 		PanelJournalEntry_t *e = &g_journal_entries[i];
-		uint8_t text_len;
 
-		/* rec_idx u32 + ts u32 + code u16 + text_len u8 */
-		if ((uint16_t)(pos + 4u + 4u + 2u + 1u) > items_len) {
+		if ((uint16_t)(pos + 4u + 4u + 2u) > items_len) {
 			break;
 		}
 
@@ -536,22 +568,15 @@ void PanelJournalCache_SetList(uint32_t total,
 		e->code = panel_rs_get_u16le(&items[pos]);
 		pos += 2u;
 
-		text_len = items[pos++];
-		if (text_len > 48u) {
-			text_len = 48u;
-		}
-
-		if ((uint16_t)(pos + text_len) > items_len) {
+		if (panel_rs_get_counted_str(items, items_len, &pos, e->header, sizeof(e->header)) == 0u) {
 			break;
 		}
-
-		memcpy(e->short_text, &items[pos], text_len);
-		e->short_text[text_len] = '\0';
-		pos = (uint16_t)(pos + text_len);
-
-		/* Полное поле пока считаем тем же, т.к. JOURNAL_DETAIL приходит отдельно. */
-		(void)strncpy(e->full_text, e->short_text, sizeof(e->full_text) - 1u);
-		e->full_text[sizeof(e->full_text) - 1u] = '\0';
+		if (panel_rs_get_counted_str(items, items_len, &pos, e->title, sizeof(e->title)) == 0u) {
+			break;
+		}
+		if (panel_rs_get_counted_str(items, items_len, &pos, e->detail, sizeof(e->detail)) == 0u) {
+			break;
+		}
 	}
 
 	g_journal_count = i;
@@ -595,13 +620,15 @@ void PanelJournalCache_SetDetail(uint32_t rec_idx,
 	found->ts = ts;
 	found->code = code;
 
-	memcpy(found->full_text, text, text_len);
-	found->full_text[text_len] = '\0';
-
-	{
-		uint16_t sl = (text_len > 48u) ? 48u : text_len;
-		memcpy(found->short_text, text, sl);
-		found->short_text[sl] = '\0';
+	memcpy(found->detail, text, text_len);
+	found->detail[text_len] = '\0';
+	if (found->header[0] == '\0') {
+		(void)strncpy(found->header, "ЖУРНАЛ", sizeof(found->header) - 1u);
+	}
+	if (found->title[0] == '\0') {
+		uint16_t sl = (text_len > (EVENT_LOG_UI_TITLE_LEN - 1u)) ? (EVENT_LOG_UI_TITLE_LEN - 1u) : text_len;
+		memcpy(found->title, text, sl);
+		found->title[sl] = '\0';
 	}
 }
 
@@ -637,9 +664,9 @@ void EventLogUi_FormatEmpty(EventLogUiLines_t *out)
 		return;
 	}
 	memset(out, 0, sizeof(*out));
-	(void)strncpy(out->header, "Журнал", sizeof(out->header) - 1u);
+	(void)strncpy(out->header, "ЖУРНАЛ", sizeof(out->header) - 1u);
 	(void)strncpy(out->title, "ПУСТО", sizeof(out->title) - 1u);
-	(void)strncpy(out->detail, "Нет данных", sizeof(out->detail) - 1u);
+	(void)strncpy(out->detail, "Нет записей", sizeof(out->detail) - 1u);
 }
 
 void EventLogUi_FormatRecord(const EventLogRecord_t *rec,
@@ -649,7 +676,9 @@ void EventLogUi_FormatRecord(const EventLogRecord_t *rec,
 {
 	PanelJournalEntry_t e;
 	uint32_t logical_index;
-	char header[EVENT_LOG_UI_HEADER_LEN];
+
+	(void)display_index_1based;
+	(void)count;
 
 	if (out == 0 || rec == 0) {
 		return;
@@ -662,12 +691,9 @@ void EventLogUi_FormatRecord(const EventLogRecord_t *rec,
 	}
 
 	memset(out, 0, sizeof(*out));
-	(void)snprintf(header, sizeof(header), "Журнал %lu/%lu",
-		       (unsigned long)display_index_1based,
-		       (unsigned long)count);
-	(void)strncpy(out->header, header, sizeof(out->header) - 1u);
-	(void)strncpy(out->title, e.short_text, sizeof(out->title) - 1u);
-	(void)strncpy(out->detail, e.full_text, sizeof(out->detail) - 1u);
+	(void)strncpy(out->header, e.header, sizeof(out->header) - 1u);
+	(void)strncpy(out->title, e.title, sizeof(out->title) - 1u);
+	(void)strncpy(out->detail, e.detail, sizeof(out->detail) - 1u);
 }
 
 bool EventLogReader_GetTierInfo(uint8_t tier, EventLogTierInfo_t *info)
