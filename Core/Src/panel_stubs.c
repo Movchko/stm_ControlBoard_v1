@@ -83,6 +83,7 @@ void Fire_NotifyZoneModeChanged(void) {}
 /* --- menu / ESP32: WiFi на ППКУ 2 --- */
 static uint8_t s_menu_cfg;
 static uint8_t s_menu_main;
+static uint16_t s_menu_session_screen;
 static uint8_t s_mcu_slot;
 static uint8_t s_block_zone_selected;
 static uint8_t s_connection_selected;
@@ -120,6 +121,8 @@ uint8_t MenuUi_IsConfigOverlayActive(void)
 }
 void MenuUi_SetMainScreenActive(uint8_t active) { s_menu_main = active; }
 uint8_t MenuUi_IsMainScreenActive(void) { return s_menu_main; }
+void MenuUi_SetMenuSessionScreen(uint16_t screen_id) { s_menu_session_screen = screen_id; }
+uint16_t MenuUi_GetMenuSessionScreen(void) { return s_menu_session_screen; }
 
 void MenuUi_SetMenuIndex(int16_t index)
 {

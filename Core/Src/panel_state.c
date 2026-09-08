@@ -43,7 +43,7 @@ static uint8_t panel_state_btn_type(uint8_t local_button)
     }
 }
 
-static uint8_t panel_state_is_remote_journal_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_journal_button(uint16_t screen, uint8_t btn)
 {
     if (screen != RS_PANEL_SCREEN_MENU_JOURNAL &&
         screen != RS_PANEL_SCREEN_MENU_JOURNAL_DETAIL) {
@@ -53,7 +53,7 @@ static uint8_t panel_state_is_remote_journal_button(uint8_t screen, uint8_t btn)
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
 }
 
-static uint8_t panel_state_is_remote_menu_root_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_menu_root_button(uint16_t screen, uint8_t btn)
 {
     if (screen != RS_PANEL_SCREEN_MENU_ROOT) {
         return 0u;
@@ -61,7 +61,7 @@ static uint8_t panel_state_is_remote_menu_root_button(uint8_t screen, uint8_t bt
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
 }
 
-static uint8_t panel_state_is_remote_menu_back_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_menu_back_button(uint16_t screen, uint8_t btn)
 {
     if (btn != BUT_ESC) {
         return 0u;
@@ -82,7 +82,7 @@ static uint8_t panel_state_is_remote_menu_back_button(uint8_t screen, uint8_t bt
     }
 }
 
-static uint8_t panel_state_is_remote_device_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_device_button(uint16_t screen, uint8_t btn)
 {
     switch (screen) {
     case RS_PANEL_SCREEN_MENU_DEVICES:
@@ -94,7 +94,7 @@ static uint8_t panel_state_is_remote_device_button(uint8_t screen, uint8_t btn)
     }
 }
 
-static uint8_t panel_state_is_remote_block_zone_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_block_zone_button(uint16_t screen, uint8_t btn)
 {
     if (screen != RS_PANEL_SCREEN_MENU_BLOCK_ZONE) {
         return 0u;
@@ -102,12 +102,45 @@ static uint8_t panel_state_is_remote_block_zone_button(uint8_t screen, uint8_t b
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
 }
 
-static uint8_t panel_state_is_remote_connection_button(uint8_t screen, uint8_t btn)
+static uint8_t panel_state_is_remote_connection_button(uint16_t screen, uint8_t btn)
 {
     if (screen != RS_PANEL_SCREEN_MENU_CONNECTION) {
         return 0u;
     }
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
+}
+
+/* Маршрут кнопок: сначала реальный TouchGFX menu-session, потом RS current_screen.
+ * НИКОГДА не подменяем MAIN/LOGO на MENU_ROOT: иначе UP на главном уходит как UI_NAV
+ * меню, мастер тихо ставит MENU_ROOT без UI_NAV на панель → рассинхрон. */
+static uint16_t panel_state_route_screen(uint16_t screen)
+{
+    const uint16_t session = MenuUi_GetMenuSessionScreen();
+    if (session != 0u) {
+        return session;
+    }
+
+    if (MenuUi_IsMainScreenActive() != 0u) {
+        return RS_PANEL_SCREEN_MAIN;
+    }
+
+    switch (screen) {
+    case RS_PANEL_SCREEN_MENU_JOURNAL:
+    case RS_PANEL_SCREEN_MENU_JOURNAL_DETAIL:
+    case RS_PANEL_SCREEN_MENU_DEVICES:
+    case RS_PANEL_SCREEN_MENU_DEVICE_DETAIL:
+    case RS_PANEL_SCREEN_MENU_CONNECTION:
+    case RS_PANEL_SCREEN_MENU_CONFIG:
+    case RS_PANEL_SCREEN_MENU_BLOCK_ZONE:
+    case RS_PANEL_SCREEN_MENU_SETTINGS:
+    case RS_PANEL_SCREEN_MENU_SOUND:
+    case RS_PANEL_SCREEN_MENU_ROOT:
+    case RS_PANEL_SCREEN_MAIN:
+    case RS_PANEL_SCREEN_LOGO:
+        return screen;
+    default:
+        return screen;
+    }
 }
 
 static void panel_state_push_journal_ui_event(PanelStateContext *ctx, uint8_t btn)
@@ -322,6 +355,7 @@ void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetC
 
 void PanelState_SampleButtons(PanelStateContext *ctx)
 {
+    uint16_t screen;
     uint8_t local_buttons[] = { BUT_ESC, BUT_UP, BUT_DOWN, BUT_ENTER, BUT_STOP, BUT_FIRE, BUT_FORCE };
     uint8_t i;
     uint8_t btn;
@@ -333,10 +367,22 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
         return;
     }
 
-    /* TouchGFX сам переходит logo→main; RS current_screen обновляется только по UI_NAV. */
-    if (MenuUi_IsMainScreenActive() != 0u && ctx->current_screen != RS_PANEL_SCREEN_MAIN) {
+    /* TouchGFX сам переходит logo→main. Синхронизируем только LOGO→MAIN:
+     * если затирать MENU_* (окно UI_NAV меню → ещё не сработал GotoScreen),
+     * UP/DOWN/ESC уходят как btn_event, а не как UI_NAV/BACK. */
+    if (MenuUi_IsMainScreenActive() != 0u &&
+        ctx->current_screen == RS_PANEL_SCREEN_LOGO) {
         ctx->current_screen = RS_PANEL_SCREEN_MAIN;
     }
+
+    {
+        const uint16_t session = MenuUi_GetMenuSessionScreen();
+        if (session != 0u) {
+            ctx->current_screen = session;
+        }
+    }
+
+    screen = panel_state_route_screen(ctx->current_screen);
 
     ctx->caps.status = 0x02u;
     for (i = 0u; i < (uint8_t)(sizeof(local_buttons) / sizeof(local_buttons[0])); i++) {
@@ -351,16 +397,15 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
 
         if (type != 0u &&
             (state != ctx->btn_prev_state[btn] || level != ctx->btn_prev_level[btn])) {
-            uint8_t route_to_ui = panel_state_is_remote_journal_button(ctx->current_screen, btn);
-            uint8_t route_device_ui = panel_state_is_remote_device_button(ctx->current_screen, btn);
-            uint8_t route_block_zone_ui = panel_state_is_remote_block_zone_button(ctx->current_screen, btn);
-            uint8_t route_connection_ui = panel_state_is_remote_connection_button(ctx->current_screen, btn);
+            uint8_t route_to_ui = panel_state_is_remote_journal_button(screen, btn);
+            uint8_t route_device_ui = panel_state_is_remote_device_button(screen, btn);
+            uint8_t route_block_zone_ui = panel_state_is_remote_block_zone_button(screen, btn);
+            uint8_t route_connection_ui = panel_state_is_remote_connection_button(screen, btn);
             if (state == (uint8_t)ButtonStatePress) {
-                const uint8_t on_main_screen =
-                    (ctx->current_screen == RS_PANEL_SCREEN_MAIN || MenuUi_IsMainScreenActive() != 0u);
+                const uint8_t on_main_screen = (MenuUi_IsMainScreenActive() != 0u);
                 const uint8_t is_main_enter =
                     (on_main_screen != 0u && btn == BUT_ENTER && ctx->fire_active == 0u);
-                const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(ctx->current_screen, btn);
+                const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(screen, btn);
 
                 if (is_main_enter != 0u) {
                     panel_state_push_ui(ctx, RS_PANEL_UI_EVT_CONFIRM, 0u, 0u);
@@ -374,7 +419,7 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
                     panel_state_push_connection_ui_event(ctx, btn);
                 } else if (is_menu_root != 0u) {
                     panel_state_push_menu_root_ui_event(ctx, btn);
-                } else if (panel_state_is_remote_menu_back_button(ctx->current_screen, btn) != 0u) {
+                } else if (panel_state_is_remote_menu_back_button(screen, btn) != 0u) {
                     panel_state_push_ui(ctx, RS_PANEL_UI_EVT_BACK, 0u, 0u);
                 } else {
                     panel_state_push_btn(ctx, type, state, level);

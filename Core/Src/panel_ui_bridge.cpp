@@ -31,12 +31,13 @@ extern "C" void PanelUiBridge_GotoScreen(uint16_t screen_id, uint8_t action)
         panel_ui_app().gotoscreen_logoScreenNoTransition();
         break;
     case RS_PANEL_SCREEN_MAIN:
+        MenuUi_SetConfigSession(0u);
+        /* main=1 ставит только реальный переход (не rs_queue_nav), иначе сюда
+         * пришли бы с main=1 ещё на экране меню и переход бы пропустился. */
         if (MenuUi_IsMainScreenActive() != 0u) {
-            MenuUi_SetConfigSession(0u);
             break;
         }
         MenuUi_SetMainScreenActive(1u);
-        MenuUi_SetConfigSession(0u);
         panel_ui_app().gotomainscreenScreenNoTransition();
         break;
     case RS_PANEL_SCREEN_MENU_ROOT:

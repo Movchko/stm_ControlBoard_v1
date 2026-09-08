@@ -22,6 +22,7 @@ void mainscreenPresenter::activate()
 {
 #ifndef SIMULATOR
     MenuUi_SetMainScreenActive(1u);
+    MenuUi_SetMenuSessionScreen(0u);
     MenuUi_ResetMenuIndex();
     /* Один раз при входе на экран — без последующего опроса в tick. */
     if (model) {

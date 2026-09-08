@@ -83,6 +83,17 @@ static volatile uint8_t s_nav_pending;
 
 static void rs_queue_nav(uint16_t screen_id, uint8_t action)
 {
+    /* Уход с главного: сразу main=0 и menu-session, чтобы UP/DOWN/ESC шли как
+     * UI-события меню ещё до ProcessDeferredUi()/activate Presenter.
+     * На MAIN флаг main НЕ трогаем заранее — иначе GotoScreen(MAIN) пропустит переход.
+     * Session сбрасываем сразу: иначе ESC/UP после UI_NAV MAIN ещё уйдут как меню. */
+    if (screen_id != RS_PANEL_SCREEN_MAIN && screen_id != RS_PANEL_SCREEN_LOGO) {
+        MenuUi_SetMainScreenActive(0u);
+        MenuUi_SetMenuSessionScreen(screen_id);
+    } else {
+        MenuUi_SetMenuSessionScreen(0u);
+    }
+
     s_deferred_nav.screen_id = screen_id;
     s_deferred_nav.action = action;
     s_nav_pending = 1u;

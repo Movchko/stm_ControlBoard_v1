@@ -21,6 +21,11 @@ uint8_t MenuUi_IsConfigOverlayActive(void);
 void MenuUi_SetMainScreenActive(uint8_t active);
 uint8_t MenuUi_IsMainScreenActive(void);
 
+/* Какой menu-экран реально открыт в TouchGFX (0 = не меню).
+ * Нужен для маршрута кнопок → UI_EVT_*, независимо от гонок RS UI_NAV. */
+void MenuUi_SetMenuSessionScreen(uint16_t screen_id);
+uint16_t MenuUi_GetMenuSessionScreen(void);
+
 void MenuUi_SetMenuIndex(int16_t index);
 int16_t MenuUi_GetMenuIndex(void);
 void MenuUi_ResetMenuIndex(void);

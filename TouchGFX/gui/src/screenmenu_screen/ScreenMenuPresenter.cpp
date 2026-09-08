@@ -3,6 +3,7 @@
 #include "button.h"
 #include "gost_mode.h"
 #include "menu_ui.h"
+#include "rs_panel_protocol.h"
 
 ScreenMenuPresenter::ScreenMenuPresenter(ScreenMenuView& v)
     : view(v)
@@ -16,6 +17,8 @@ ScreenMenuPresenter::ScreenMenuPresenter(ScreenMenuView& v)
 void ScreenMenuPresenter::activate()
 {
 #ifndef SIMULATOR
+    MenuUi_SetMainScreenActive(0u);
+    MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_ROOT);
     soundOn = (MenuUi_GetSoundValue() != 0u);
     currentIndex = (int16_t)MenuUi_GetMenuSelected();
     if (currentIndex >= MENU_ITEMS) {
@@ -28,6 +31,9 @@ void ScreenMenuPresenter::activate()
 
 void ScreenMenuPresenter::deactivate()
 {
+#ifndef SIMULATOR
+    MenuUi_SetMenuSessionScreen(0u);
+#endif
 }
 
 #ifndef SIMULATOR
@@ -59,23 +65,9 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
         return;
     }
 
-    if (but == BUT_ESC) {
-        return;
-    }
-
-    if (but == BUT_UP) {
-        return;
-    }
-
-    if (but == BUT_DOWN) {
-        return;
-    }
-
-    if (but == BUT_ENTER) {
-        /* В режиме RS-контроля выбор пункта меню обрабатывает master
-         * через panel_state -> UI_EVT_MENU_SELECT. */
-        return;
-    }
+    /* UP/DOWN/ESC/ENTER в меню не обрабатываем локально: panel_state шлёт
+     * событие на ППКУ 2, мастер отвечает UI_NAV / MENU_LIST. */
+    (void)but;
 }
 
 void ScreenMenuPresenter::onAppTick()

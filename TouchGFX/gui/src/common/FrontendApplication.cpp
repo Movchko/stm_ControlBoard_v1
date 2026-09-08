@@ -24,6 +24,8 @@
 #include "fire.h"
 #include "menu_ui.h"
 #include "rs_panel_endpoint.h"
+#include "panel_ui_bridge.h"
+#include "rs_panel_protocol.h"
 #endif
 
 using namespace touchgfx;
@@ -49,7 +51,8 @@ void FrontendApplication::handleTickEvent()
             Esp32_SetEnabled(0u);
             MenuUi_SetConfigSession(0u);
         }
-        gotomainscreenScreenNoTransition();
+        /* Через bridge: сразу MAIN для маршрута кнопок + current_screen. */
+        PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
         FrontendApplicationBase::handleTickEvent();
         RsPanelEndpoint_ProcessDeferredUi();
         return;

@@ -291,6 +291,8 @@ static void ui_return_to_priority(mainscreenView* view)
 	s_nav_last_press_ms = 0u;
 	Fire_UiSetManualSelection(0u, 0u);
 	s_banner_mode = BANNER_NONE;
+	memset(s_cur, 0, sizeof(s_cur));
+	ui_invalidate_warn_marquee_cache();
 	ui_show_desired(view, true);
 }
 
@@ -910,9 +912,7 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 void mainscreenView::handleMainNavButton(uint8_t but)
 {
 	if (but == BUT_ESC) {
-		if (s_manual_browse) {
-			ui_return_to_priority(this);
-		}
+		ui_return_to_priority(this);
 		return;
 	}
 	if (but != BUT_UP && but != BUT_DOWN || ui_highest_nonempty() == BANNER_NONE) {
