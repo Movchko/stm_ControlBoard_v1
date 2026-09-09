@@ -1,5 +1,6 @@
 #include "rs_panel_endpoint.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "beeper.h"
@@ -9,6 +10,7 @@
 #include "led.h"
 #include "main.h"
 #include "menu_ui.h"
+#include "panel_app.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
 #include "rs_panel_debug.h"
@@ -904,6 +906,30 @@ static void rs_send_activity(RsPanelEndpoint *endpoint)
                       pos);
 }
 
+static void rs_send_version(RsPanelEndpoint *endpoint)
+{
+    char ver[32];
+    int n;
+
+    if (endpoint == 0) {
+        return;
+    }
+    n = snprintf(ver, sizeof(ver), "fw=%u", (unsigned)PANEL_APP_VERSION_U32);
+    if (n <= 0) {
+        return;
+    }
+    if (n >= (int)sizeof(ver)) {
+        n = (int)sizeof(ver) - 1;
+    }
+    rs_bus_send_frame(endpoint,
+                      endpoint->panel_addr,
+                      endpoint->next_tx_seq++,
+                      RS_BUS_FLAG_DIR,
+                      RS_PANEL_CMD_BOOT_GET_VERSION,
+                      (const uint8_t *)ver,
+                      (uint16_t)n);
+}
+
 static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
 {
     RsPanelEndpoint *endpoint = (RsPanelEndpoint *)ctx;
@@ -1060,6 +1086,9 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         PanelBoot_SetUpdateRequest(endpoint->panel_addr);
         HAL_Delay(20);
         NVIC_SystemReset();
+        break;
+    case RS_PANEL_CMD_BOOT_GET_VERSION:
+        rs_send_version(endpoint);
         break;
     default:
         break;

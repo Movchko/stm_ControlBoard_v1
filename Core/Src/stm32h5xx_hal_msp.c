@@ -720,7 +720,12 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     HAL_NVIC_EnableIRQ(UART4_IRQn);
 
     /* USER CODE BEGIN UART4_MspInit 1 */
-
+    /* Бутлоадер GTZC помечает SRAM как privileged; Cube ставит канал NPRIV.
+     * Привилегированный канал DMA пишет в SRAM в обоих случаях (отладчик и прыжок из бута). */
+    if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel1, DMA_CHANNEL_PRIV) != HAL_OK)
+    {
+      Error_Handler();
+    }
     /* USER CODE END UART4_MspInit 1 */
 
   }

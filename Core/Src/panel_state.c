@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "menu_ui.h"
+#include "panel_app.h"
 #include "rs_panel_debug.h"
 
 static void panel_state_push_btn(PanelStateContext *ctx, uint8_t type, uint8_t state, uint8_t level)
@@ -301,7 +302,7 @@ void PanelState_Init(PanelStateContext *ctx)
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
-    ctx->caps.fw_ver = 1u;
+    ctx->caps.fw_ver = (uint16_t)PANEL_APP_VERSION_U32;
     ctx->caps.hw_id = 1u;
     ctx->caps.disp_w = 128u;
     ctx->caps.disp_h = 64u;

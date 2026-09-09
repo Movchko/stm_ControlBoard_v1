@@ -8,9 +8,6 @@
  */
 void App_WriteProgramWatchdog(void)
 {
-	//TODO на время отладки убрано, поскольку нет бутлоадера. пока убираем
-	return;
-
 
 	uint32_t *val = (uint32_t *)PANEL_APP_WD_ADDR;
 
