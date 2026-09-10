@@ -54,6 +54,7 @@ extern void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
 static RsPanelEndpoint g_endpoint;
 static uint32_t g_activity_accum_ms = 0u;
 static uint32_t g_uptime_sec = 0u;
+static volatile uint8_t g_enter_bootloader_pending = 0u;
 
 typedef struct {
     uint8_t active;
@@ -869,7 +870,8 @@ static void rs_send_ack(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq, ui
 static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq)
 {
     RsPanelPollRsp rsp;
-    uint8_t payload[96];
+    /* status+counts + 16×btn(3) + 16×ui(5) ≈ 131 B; запас под рост. */
+    uint8_t payload[160];
     uint16_t payload_len;
 
     PanelState_FillPollResponse(&endpoint->state, &rsp);
@@ -1081,11 +1083,10 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         break;
     case RS_PANEL_CMD_ENTER_BOOTLOADER:
-        /* ACK уходит до reset; ПО/ППКУ прокидывает кадр как есть. */
+        /* ACK из RX IRQ; reset — из Timer10ms (не Delay/Reset в callback UART). */
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         PanelBoot_SetUpdateRequest(endpoint->panel_addr);
-        HAL_Delay(20);
-        NVIC_SystemReset();
+        g_enter_bootloader_pending = 1u;
         break;
     case RS_PANEL_CMD_BOOT_GET_VERSION:
         rs_send_version(endpoint);
@@ -1110,6 +1111,10 @@ void RsPanelEndpoint_Timer10ms(void)
 {
     /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
      * иначе WARN попадает в уничтожаемый view, а setupScreen снова рисует «НОРМА». */
+    if (g_enter_bootloader_pending != 0u) {
+        g_enter_bootloader_pending = 0u;
+        NVIC_SystemReset();
+    }
     PanelState_SampleButtons(&g_endpoint.state);
     g_rs_panel_dbg.current_screen = g_endpoint.state.current_screen;
     g_rs_panel_dbg.pending_ui_count = g_endpoint.state.pending_ui_count;

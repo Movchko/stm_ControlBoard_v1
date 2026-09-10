@@ -18,7 +18,7 @@ typedef struct {
     uint8_t frag_next_idx;
     uint8_t frag_total;
     uint16_t frag_len;
-    uint8_t frag_buf[1024];
+    uint8_t frag_buf[2048];
 } RsPanelEndpoint;
 
 void RsPanelEndpoint_Init(void);
