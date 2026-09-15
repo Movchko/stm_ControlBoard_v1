@@ -11,6 +11,7 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "panel_app.h"
+#include "panel_cfg.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
 #include "rs_panel_debug.h"
@@ -214,6 +215,15 @@ static uint32_t rs_get_u32le(const uint8_t *src)
            ((uint32_t)src[3] << 24);
 }
 
+static uint16_t rs_put_u32le(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value & 0xFFu);
+    dst[1] = (uint8_t)((value >> 8) & 0xFFu);
+    dst[2] = (uint8_t)((value >> 16) & 0xFFu);
+    dst[3] = (uint8_t)((value >> 24) & 0xFFu);
+    return 4u;
+}
+
 static void rs_frag_reset(RsPanelEndpoint *endpoint)
 {
     if (endpoint == 0) {
@@ -374,6 +384,7 @@ static uint8_t rs_decode_profile_set_cmd(const uint8_t *src, uint16_t src_len, R
     case RS_PANEL_PROFILE_SET_ORIENTATION:
     case RS_PANEL_PROFILE_SET_BTN_MASK:
     case RS_PANEL_PROFILE_SET_JOURNAL_LINES:
+    case RS_PANEL_PROFILE_SET_RS_ADDR:
         if (src_len < 2u) {
             return 0u;
         }
@@ -467,6 +478,7 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
     case RS_PANEL_SOUND_OFF:
         Beeper_StopPattern();
         Beeper_FireAlarmOff();
+        Beeper_ContinuousOff();
         break;
     case RS_PANEL_SOUND_FAULT:
         Beeper_StartPulseTrain(BEEPER_PATTERN_FAULT_ON_MS,
@@ -885,13 +897,15 @@ static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t se
 
 static void rs_send_activity(RsPanelEndpoint *endpoint)
 {
-    uint8_t payload[RS_PANEL_ACTIVITY_PAYLOAD_SIZE];
+    uint8_t payload[RS_PANEL_ACTIVITY_PAYLOAD_SIZE_UID];
     uint16_t pos = 0u;
+    const DevicePanelConfig *cfg;
 
     if (endpoint == 0) {
         return;
     }
-    payload[pos++] = (uint8_t)RS_BUS_DEV_TYPE_PANEL_APP;
+    cfg = PanelCfg_Get();
+    payload[pos++] = (uint8_t)DEVICE_PANEL_TYPE;
     pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.fw_ver));
     pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.hw_id));
     payload[pos++] = endpoint->state.caps.status;
@@ -899,6 +913,9 @@ static void rs_send_activity(RsPanelEndpoint *endpoint)
     payload[pos++] = (uint8_t)((g_uptime_sec >> 8) & 0xFFu);
     payload[pos++] = (uint8_t)((g_uptime_sec >> 16) & 0xFFu);
     payload[pos++] = (uint8_t)((g_uptime_sec >> 24) & 0xFFu);
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid0));
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid1));
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid2));
     rs_bus_send_frame(endpoint,
                       endpoint->panel_addr,
                       endpoint->next_tx_seq++,
@@ -906,6 +923,58 @@ static void rs_send_activity(RsPanelEndpoint *endpoint)
                       RS_PANEL_RSP_ACTIVITY,
                       payload,
                       pos);
+}
+
+static void rs_send_discover_rsp(RsPanelEndpoint *endpoint)
+{
+    uint8_t payload[RS_PANEL_DISCOVER_RSP_SIZE];
+    uint16_t pos = 0u;
+    const DevicePanelConfig *cfg;
+
+    if (endpoint == 0) {
+        return;
+    }
+    cfg = PanelCfg_Get();
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid0));
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid1));
+    pos = (uint16_t)(pos + rs_put_u32le(&payload[pos], cfg->uid2));
+    payload[pos++] = endpoint->panel_addr;
+    payload[pos++] = (cfg->addr_assigned != 0u) ? RS_PANEL_DISCOVER_FLAG_ASSIGNED : 0u;
+    rs_bus_send_frame(endpoint,
+                      endpoint->panel_addr,
+                      endpoint->next_tx_seq++,
+                      RS_BUS_FLAG_DIR,
+                      RS_PANEL_RSP_DISCOVER,
+                      payload,
+                      pos);
+}
+
+static void rs_apply_assign_by_uid(RsPanelEndpoint *endpoint, const uint8_t *payload, uint16_t len)
+{
+    RsPanelAssignByUidCmd cmd;
+    const DevicePanelConfig *cfg;
+
+    if (endpoint == 0 || payload == 0 || len < RS_PANEL_ASSIGN_BY_UID_SIZE) {
+        return;
+    }
+    cmd.uid0 = rs_get_u32le(&payload[0]);
+    cmd.uid1 = rs_get_u32le(&payload[4]);
+    cmd.uid2 = rs_get_u32le(&payload[8]);
+    cmd.new_addr = payload[12];
+
+    cfg = PanelCfg_Get();
+    if (cfg->uid0 != cmd.uid0 || cfg->uid1 != cmd.uid1 || cfg->uid2 != cmd.uid2) {
+        return;
+    }
+    if (PanelCfg_IsValidRsAddr(cmd.new_addr) == 0u) {
+        return;
+    }
+    g_panel_cfg.rs_addr = cmd.new_addr;
+    g_panel_cfg.addr_assigned = 1u;
+    PanelCfg_Save();
+    endpoint->panel_addr = g_panel_cfg.rs_addr;
+    PanelBoot_SetRsAddr(endpoint->panel_addr);
+    rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, 0u);
 }
 
 static void rs_send_version(RsPanelEndpoint *endpoint)
@@ -1072,8 +1141,11 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         {
             RsPanelProfileSetCmd profile_cmd;
             if (rs_decode_profile_set_cmd(frame->payload, frame->payload_len, &profile_cmd)) {
+                /* CAPS/ответ на старом адресе, затем применяем новый rs_addr из Flash. */
                 PanelState_ApplyProfileSet(&endpoint->state, &profile_cmd);
                 rs_send_caps(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++);
+                endpoint->panel_addr = PanelCfg_Get()->rs_addr;
+                PanelBoot_SetRsAddr(endpoint->panel_addr);
             }
         }
         break;
@@ -1088,6 +1160,18 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         PanelBoot_SetUpdateRequest(endpoint->panel_addr);
         g_enter_bootloader_pending = 1u;
         break;
+    case RS_PANEL_CMD_DISCOVER:
+        /* Ответ со случайной задержкой — из Timer10ms (не TX из RX IRQ пачкой). */
+        endpoint->discover_pending = 1u;
+        endpoint->discover_delay_ticks =
+            (uint16_t)((PanelCfg_DiscoverDelayMs() + 9u) / 10u);
+        if (endpoint->discover_delay_ticks == 0u) {
+            endpoint->discover_delay_ticks = 1u;
+        }
+        break;
+    case RS_PANEL_CMD_ASSIGN_BY_UID:
+        rs_apply_assign_by_uid(endpoint, frame->payload, frame->payload_len);
+        break;
     case RS_PANEL_CMD_BOOT_GET_VERSION:
         rs_send_version(endpoint);
         break;
@@ -1098,9 +1182,12 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
 
 void RsPanelEndpoint_Init(void)
 {
+    uint8_t addr;
+
     memset(&g_endpoint, 0, sizeof(g_endpoint));
     RsPanelDebug_Reset();
-    g_endpoint.panel_addr = 0x01u;
+    addr = PanelCfg_Init();
+    g_endpoint.panel_addr = addr;
     PanelBoot_SetRsAddr(g_endpoint.panel_addr);
     g_endpoint.next_tx_seq = 1u;
     PanelState_Init(&g_endpoint.state);
@@ -1114,6 +1201,15 @@ void RsPanelEndpoint_Timer10ms(void)
     if (g_enter_bootloader_pending != 0u) {
         g_enter_bootloader_pending = 0u;
         NVIC_SystemReset();
+    }
+    if (g_endpoint.discover_pending != 0u) {
+        if (g_endpoint.discover_delay_ticks > 0u) {
+            g_endpoint.discover_delay_ticks--;
+        }
+        if (g_endpoint.discover_delay_ticks == 0u) {
+            g_endpoint.discover_pending = 0u;
+            rs_send_discover_rsp(&g_endpoint);
+        }
     }
     PanelState_SampleButtons(&g_endpoint.state);
     g_rs_panel_dbg.current_screen = g_endpoint.state.current_screen;

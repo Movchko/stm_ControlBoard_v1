@@ -7,6 +7,7 @@
 #include "event_log_ui.h"
 #include "event_log_reader.h"
 #include "device_config.h"
+#include "panel_cfg.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -52,8 +53,12 @@ void Fire_NotifyUiStatus(uint8_t ui_active, uint8_t mode, uint8_t remaining_s, u
 	s_start_all_hold_active = is_hold_idle;
 }
 
-/* Конфиг хранится на ППКУ 2; на панели запись в Flash не делается. */
-void SaveConfig(void) {}
+/* Локальный конфиг панели (DevicePanelConfig) — Flash сектор CFG.
+ * PPKYConfig в RAM — кэш UI от ППКУ, во Flash панели не пишется. */
+void SaveConfig(void)
+{
+	PanelCfg_Save();
+}
 
 /* --- fire: логика тушения остаётся на ППКУ 2 --- */
 void Fire_Init(void) {}

@@ -164,7 +164,7 @@ static void Beeper_Tim6Configure(void)
 
 static void Beeper_DacWrite(uint32_t level)
 {
-	//TODO DELETE
+	//TODO DELETE  return;
 
 	return;
 

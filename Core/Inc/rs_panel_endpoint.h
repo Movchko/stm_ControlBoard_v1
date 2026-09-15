@@ -19,6 +19,9 @@ typedef struct {
     uint8_t frag_total;
     uint16_t frag_len;
     uint8_t frag_buf[2048];
+    /* Отложенный RSP_DISCOVER (разнос по UID). */
+    uint8_t discover_pending;
+    uint16_t discover_delay_ticks; /* 10 мс тики */
 } RsPanelEndpoint;
 
 void RsPanelEndpoint_Init(void);

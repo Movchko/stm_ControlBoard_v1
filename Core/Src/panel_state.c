@@ -4,6 +4,7 @@
 
 #include "menu_ui.h"
 #include "panel_app.h"
+#include "panel_cfg.h"
 #include "rs_panel_debug.h"
 
 static void panel_state_push_btn(PanelStateContext *ctx, uint8_t type, uint8_t state, uint8_t level)
@@ -306,7 +307,6 @@ void PanelState_Init(PanelStateContext *ctx)
     ctx->caps.hw_id = 1u;
     ctx->caps.disp_w = 128u;
     ctx->caps.disp_h = 64u;
-    ctx->caps.journal_lines = 1u;
     ctx->caps.btn_count = (uint8_t)(sizeof(btns) / sizeof(btns[0]));
     memcpy(ctx->caps.btn_list, btns, sizeof(btns));
     ctx->caps.led_count = (uint8_t)(sizeof(leds) / sizeof(leds[0]));
@@ -315,6 +315,11 @@ void PanelState_Init(PanelStateContext *ctx)
     ctx->caps.status = 0x03u;
     ctx->current_screen = RS_PANEL_SCREEN_LOGO;
     ctx->fire_active = 0u;
+    {
+        const DevicePanelConfig *pcfg = PanelCfg_Get();
+        ctx->caps.orientation = pcfg->orientation;
+        ctx->caps.journal_lines = (pcfg->journal_lines != 0u) ? pcfg->journal_lines : 1u;
+    }
 }
 
 void PanelState_ResetUi(PanelStateContext *ctx)
@@ -332,6 +337,8 @@ void PanelState_ResetUi(PanelStateContext *ctx)
 
 void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetCmd *cmd)
 {
+    uint8_t need_save = 0u;
+
     if (ctx == 0 || cmd == 0) {
         return;
     }
@@ -339,18 +346,43 @@ void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetC
     switch (cmd->sub) {
     case RS_PANEL_PROFILE_SET_ORIENTATION:
         ctx->caps.orientation = cmd->value.orientation;
+        g_panel_cfg.orientation = cmd->value.orientation;
+        need_save = 1u;
+        break;
+    case RS_PANEL_PROFILE_SET_BTN_MASK:
+        g_panel_cfg.btn_enable = cmd->value.btn_enable;
+        need_save = 1u;
+        break;
+    case RS_PANEL_PROFILE_SET_LED_MASK:
+        g_panel_cfg.led_enable = cmd->value.led_enable;
+        need_save = 1u;
         break;
     case RS_PANEL_PROFILE_SET_JOURNAL_LINES:
         ctx->caps.journal_lines = cmd->value.journal_lines;
         if (ctx->caps.journal_lines == 0u) {
             ctx->caps.journal_lines = 1u;
         }
+        g_panel_cfg.journal_lines = ctx->caps.journal_lines;
+        need_save = 1u;
+        break;
+    case RS_PANEL_PROFILE_SET_RS_ADDR:
+        if (PanelCfg_IsValidRsAddr(cmd->value.rs_addr) != 0u) {
+            g_panel_cfg.rs_addr = cmd->value.rs_addr;
+            g_panel_cfg.addr_assigned = 1u;
+            need_save = 1u;
+        }
         break;
     case RS_PANEL_PROFILE_SET_FACTORY_RESET:
+        PanelCfg_SetDefaults(&g_panel_cfg);
         PanelState_Init(ctx);
+        need_save = 1u;
         break;
     default:
         break;
+    }
+
+    if (need_save != 0u) {
+        PanelCfg_Save();
     }
 }
 
