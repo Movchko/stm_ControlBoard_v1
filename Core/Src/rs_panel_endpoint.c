@@ -460,9 +460,35 @@ static void rs_apply_leds(const RsPanelLedCmd *cmd)
     }
 }
 
+static RsPanelSoundCmd s_last_sound_cmd;
+static uint8_t s_last_sound_valid = 0u;
+
+static uint8_t rs_sound_cmd_same(const RsPanelSoundCmd *a, const RsPanelSoundCmd *b)
+{
+    if (a == 0 || b == 0) {
+        return 0u;
+    }
+    if (a->profile != b->profile || a->mute != b->mute) {
+        return 0u;
+    }
+    if (a->profile == RS_PANEL_SOUND_CUSTOM) {
+        return (a->on_ms == b->on_ms && a->off_ms == b->off_ms &&
+                a->pulses == b->pulses && a->repeat_ms == b->repeat_ms) ? 1u : 0u;
+    }
+    return 1u;
+}
+
 static void rs_apply_sound(const RsPanelSoundCmd *cmd)
 {
     if (cmd == 0) {
+        return;
+    }
+
+    /* Повтор той же команды не рестартует дежурный паттерн (иначе бип каждые ~1 с).
+     * BTN_ACK всегда проигрываем. */
+    if (cmd->profile != RS_PANEL_SOUND_BTN_ACK &&
+        s_last_sound_valid != 0u &&
+        rs_sound_cmd_same(cmd, &s_last_sound_cmd) != 0u) {
         return;
     }
 
@@ -471,6 +497,8 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
     if (cmd->mute != 0u) {
         Beeper_StopPattern();
         Beeper_FireAlarmOff();
+        s_last_sound_cmd = *cmd;
+        s_last_sound_valid = 1u;
         return;
     }
 
@@ -521,6 +549,11 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
         break;
     default:
         break;
+    }
+
+    if (cmd->profile != RS_PANEL_SOUND_BTN_ACK) {
+        s_last_sound_cmd = *cmd;
+        s_last_sound_valid = 1u;
     }
 }
 

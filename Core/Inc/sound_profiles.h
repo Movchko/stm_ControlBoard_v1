@@ -7,6 +7,8 @@
  */
 #define SOUND_DAC_SAMPLE_HZ                    32000u
 #define SOUND_TONE_HZ                          2093u
+/* KPEG116: резонанс 2.0 kHz (макс. SPL по даташиту). */
+#define SOUND_FIRE_TONE_HZ                     2000u
 #define SOUND_DAC_LEVEL_MAX                    4095u
 #define SOUND_DAC_LEVEL_MID                    2048u
 #define SOUND_DAC_LEVEL_OFF                    0u

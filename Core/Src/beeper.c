@@ -166,7 +166,7 @@ static void Beeper_DacWrite(uint32_t level)
 {
 	//TODO DELETE  return;
 
-	return;
+	//return;
 
 	if (level > SOUND_DAC_LEVEL_MAX) {
 		level = SOUND_DAC_LEVEL_MAX;
@@ -506,12 +506,13 @@ void Beeper_ContinuousOn(void)
 
 void Beeper_FireAlarmOn(void)
 {
-	Beeper_ContinuousOn();
-
-	//beeper_state = BEEPER_STATE_FIRE_ALARM;
-	//fire_alarm_sound = 1u;
-	//beeper_counter = BEEPER_FIRE_ON_TICKS;
-	//Beeper_On();
+	/* Непрерывный тон на резонансе KPEG116 (2.0 kHz) — максимум громкости. */
+	g_resume_ctx.valid = 0u;
+	beeper_state = BEEPER_STATE_CONTINUOUS;
+	beeper_counter = 0;
+	beep_phase = 0;
+	Beeper_SetNoteHz(SOUND_FIRE_TONE_HZ);
+	Beeper_On();
 }
 
 void Beeper_FireAlarmOff(void)
