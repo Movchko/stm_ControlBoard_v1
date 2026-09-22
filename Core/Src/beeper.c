@@ -628,7 +628,7 @@ void Beeper_ButtonAcknowledge(void)
 void Beeper_PlayIndicationTest(void)
 {
 	const uint8_t saved_mute = beep_sound;
-	uint8_t pass;
+	//uint8_t pass;
 
 	if (!Beeper_IsOneShotState(beeper_state)) {
 		Beeper_CaptureResumeStateIfNeeded();
@@ -638,10 +638,10 @@ void Beeper_PlayIndicationTest(void)
 	beeper_state = BEEPER_STATE_IDLE;
 	Beeper_Off();
 
-	for (pass = 0u; pass < 2u; pass++) {
+	//for (pass = 0u; pass < 2u; pass++) {
 		Beeper_PlayMelody(s_test_murka_chorus,
 			(uint16_t)(sizeof(s_test_murka_chorus) / sizeof(s_test_murka_chorus[0])));
-	}
+	//}
 
 	beep_sound = saved_mute;
 	Beeper_RestoreAfterOneShot();

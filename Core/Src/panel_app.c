@@ -22,9 +22,7 @@ extern PPKYCfg PPKYConfig;
 
 
 
-void PanelApp_Init(void)
-
-{
+void PanelApp_Init(void) {
 
 	PPKYConfig.beep = 1u;
 
@@ -49,16 +47,13 @@ void PanelApp_Init(void)
 
 
 
-void PanelApp_Timer1ms(void)
-{
+void PanelApp_Timer1ms(void) {
 	MenuConfig_Process1ms(HAL_GetTick());
 }
 
 
 
-void PanelApp_Timer10ms(void)
-
-{
+void PanelApp_Timer10ms(void) {
 
 	static uint8_t rtc_div;
 	static uint16_t s_app_wd_ticks = 0u;
@@ -91,8 +86,7 @@ void PanelApp_Timer10ms(void)
 
 }
 
-void PanelApp_Rs485Init(void)
-{
+void PanelApp_Rs485Init(void) {
 	RsPanelEndpoint_Init();
 }
 
