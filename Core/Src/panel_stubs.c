@@ -78,6 +78,7 @@ void Fire_OnReplyResumeExtinguishmentTimer(uint32_t msg_id) { (void)msg_id; }
 uint8_t Fire_IsActive(void) { return s_fire_is_active; }
 uint8_t Fire_HasExtinguishIncomplete(void) { return 0u; }
 uint8_t Fire_IsStartAllHoldActive(void) { return s_start_all_hold_active; }
+uint8_t Fire_IsExtinguishIndicationActive(void) { return 0u; }
 void Fire_UiSetManualSelection(uint8_t enabled, uint8_t selected_ui_index)
 {
 	(void)enabled;

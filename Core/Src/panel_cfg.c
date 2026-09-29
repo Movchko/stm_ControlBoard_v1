@@ -36,6 +36,7 @@ void PanelCfg_SetDefaults(DevicePanelConfig *cfg)
 	cfg->led_enable = 0xFFFFu;
 	cfg->role = 0u;
 	cfg->addr_assigned = 0u;
+	cfg->panel_type = PANEL_TYPE_SMALL;
 	PanelCfg_RefreshChipUid(cfg);
 }
 
@@ -153,6 +154,10 @@ uint8_t PanelCfg_Init(void)
 		PanelCfg_Save();
 	} else {
 		PanelCfg_RefreshChipUid(&g_panel_cfg);
+		if (g_panel_cfg.panel_type != PANEL_TYPE_BIG &&
+		    g_panel_cfg.panel_type != PANEL_TYPE_SMALL) {
+			g_panel_cfg.panel_type = PANEL_TYPE_SMALL;
+		}
 	}
 	return g_panel_cfg.rs_addr;
 }

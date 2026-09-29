@@ -24,6 +24,8 @@ typedef struct {
     uint8_t pending_ui_count;
     char warning_titles[PANEL_STATE_MAX_WARN_ITEMS][24];
     char warning_details[PANEL_STATE_MAX_WARN_ITEMS][ZONE_NAME_SIZE + 1];
+    /* 1 = нужно отправить RSP_CAPS (автоопределение типа / PROFILE_SET). */
+    uint8_t caps_resync_pending;
 } PanelStateContext;
 
 void PanelState_Init(PanelStateContext *ctx);
@@ -31,6 +33,8 @@ void PanelState_ResetUi(PanelStateContext *ctx);
 void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetCmd *cmd);
 void PanelState_SampleButtons(PanelStateContext *ctx);
 void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp);
+/* 1 = был запрос на пересылку CAPS; сбрасывает флаг. */
+uint8_t PanelState_TakeCapsResyncPending(PanelStateContext *ctx);
 
 #ifdef __cplusplus
 }

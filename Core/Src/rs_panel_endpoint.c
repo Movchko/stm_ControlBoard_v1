@@ -385,6 +385,7 @@ static uint8_t rs_decode_profile_set_cmd(const uint8_t *src, uint16_t src_len, R
     case RS_PANEL_PROFILE_SET_BTN_MASK:
     case RS_PANEL_PROFILE_SET_JOURNAL_LINES:
     case RS_PANEL_PROFILE_SET_RS_ADDR:
+    case RS_PANEL_PROFILE_SET_PANEL_TYPE:
         if (src_len < 2u) {
             return 0u;
         }
@@ -1245,6 +1246,9 @@ void RsPanelEndpoint_Timer10ms(void)
         }
     }
     PanelState_SampleButtons(&g_endpoint.state);
+    if (PanelState_TakeCapsResyncPending(&g_endpoint.state) != 0u) {
+        rs_send_caps(&g_endpoint, g_endpoint.panel_addr, g_endpoint.next_tx_seq++);
+    }
     g_rs_panel_dbg.current_screen = g_endpoint.state.current_screen;
     g_rs_panel_dbg.pending_ui_count = g_endpoint.state.pending_ui_count;
     g_rs_panel_dbg.pending_btn_count = g_endpoint.state.pending_btn_count;
