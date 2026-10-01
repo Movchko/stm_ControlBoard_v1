@@ -32,6 +32,10 @@ static uint8_t  led_but_is_bright = 0; /* 0 - базовая яркость, 1 -
 static uint8_t  led_status_prev_state[LED_STATUS_COUNT];
 static uint16_t led_status_idle_counter[LED_STATUS_COUNT];
 static uint8_t  led_status_is_dimmed[LED_STATUS_COUNT];
+/* Софт-мигание для logical state==2 (MODE_BLINK): период 2×400 мс при тике 10 мс. */
+#define LED_BLINK_HALF_TICKS 40u
+static uint16_t s_led_blink_tick = 0u;
+static uint8_t  s_led_blink_on = 1u;
 
 static void Led_UpdateStatusBrightness(void)
 {
@@ -69,7 +73,17 @@ static uint8_t Led_PackGroupState(const uint8_t *state_arr, uint8_t group)
 	for (uint8_t i = 0u; i < 4u; i++) {
 		uint8_t idx = (uint8_t)(base + i);
 		uint8_t st = (idx < NUM_LED) ? state_arr[idx] : LED_OFF;
-		val |= ((st & 0x03u) << 1u) << (i * 2u);
+		st &= 0x03u;
+		/* I2C (AW9523): на LED 2 бита, кодирование (st<<1): 0→00 off, 1→10 LED on.
+		 * st==2 (логический BLINK) даёт (2<<1)=0b100 и затирает соседний канал
+		 * (LED_START blink → физически OFF + LED_STOP ON). В пакет — как ON/OFF
+		 * по фазе; мигание крутит Led_Process. */
+		if (st == 2u) {
+			st = (s_led_blink_on != 0u) ? 1u : 0u;
+		} else if (st > 1u) {
+			st = 1u;
+		}
+		val |= (uint8_t)((st << 1u) << (i * 2u));
 	}
 	return val;
 }
@@ -289,6 +303,37 @@ void Led_Process() {
 		}
 	}
 	Led_UpdateStatusBrightness();
+
+	/* Logical BLINK (state==2): переключаем фазу и форсируем I2C sync. */
+	{
+		uint8_t any_blink = 0u;
+		uint8_t li;
+		for (li = 0u; li < NUM_LED; li++) {
+			if ((cur_led_state[li] & 0x03u) == 2u) {
+				any_blink = 1u;
+				break;
+			}
+		}
+		if (any_blink != 0u) {
+			if (s_led_blink_tick < LED_BLINK_HALF_TICKS) {
+				s_led_blink_tick++;
+			}
+			if (s_led_blink_tick >= LED_BLINK_HALF_TICKS) {
+				s_led_blink_tick = 0u;
+				s_led_blink_on = (uint8_t)!s_led_blink_on;
+				/* Сброс hw-кэша для blink-каналов — иначе Pack cur==hw и sync не уйдёт. */
+				for (li = 0u; li < NUM_LED; li++) {
+					if ((cur_led_state[li] & 0x03u) == 2u) {
+						hw_led_state[li] = 0xFFu;
+					}
+				}
+				led_sync_tick = LED_I2C_SYNC_PERIOD_TICKS;
+			}
+		} else {
+			s_led_blink_tick = 0u;
+			s_led_blink_on = 1u;
+		}
+	}
 
 	/* Периодическая синхронизация состояния/яркости в драйвер LED по I2C */
 	if (led_sync_tick < LED_I2C_SYNC_PERIOD_TICKS) {

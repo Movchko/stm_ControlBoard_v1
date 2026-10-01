@@ -11,6 +11,7 @@
 #include "Display/display.h"
 #include "main.h"
 #include "stm32h5xx_hal.h"
+#include "device_config.h"
 
 // External SPI handle from main.c
 extern SPI_HandleTypeDef hspi3;
@@ -102,6 +103,7 @@ void InitDisplay(void) {
 	Write_Command(0xD3);       // Display offset
 	Write_Command(0x00);
 	Write_Command(0x40);       // Display start line
+	/* По умолчанию — гориз. (A1/C8). Type3 применится после PanelCfg_Init. */
 	Write_Command(0xA1);       // Segment remap //A0 revert
 	Write_Command(0xC8);       // COM scan direction //C0 revert
 	Write_Command(0xDA);       // COM pins
@@ -115,6 +117,19 @@ void InitDisplay(void) {
 	Write_Command(0x14);
 	//Write_Command(0xAF);       // Display ON
 	HAL_Delay(100);  // Дать время дисплею на включение
+}
+
+void Display_ApplyPanelType(uint8_t panel_type)
+{
+	/* Type 3 (маленькая вертикальная): переворот сегментов/COM.
+	 * Type 1/2: штатный remap A1/C8. */
+	if (panel_type == PANEL_TYPE_3) {
+		Write_Command(0xA0); /* Segment remap revert */
+		Write_Command(0xC0); /* COM scan direction revert */
+	} else {
+		Write_Command(0xA1);
+		Write_Command(0xC8);
+	}
 }
 
 /**

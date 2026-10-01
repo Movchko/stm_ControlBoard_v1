@@ -85,7 +85,9 @@ extern "C" void PanelUiBridge_SetFireStatus(uint8_t active,
                                             uint8_t mode,
                                             uint8_t remaining_s,
                                             uint8_t n_zones,
-                                            char (*zone_names)[ZONE_NAME_SIZE + 1])
+                                            char (*zone_names)[ZONE_NAME_SIZE + 1],
+                                            const uint8_t *zone_modes,
+                                            const uint8_t *zone_remaining)
 {
     Model& model = FrontendHeap::getInstance().model;
     model.setFireStatusFromApp(active != 0u,
@@ -93,13 +95,19 @@ extern "C" void PanelUiBridge_SetFireStatus(uint8_t active,
                                 0xFFu,
                                 remaining_s,
                                 n_zones,
-                                zone_names);
+                                zone_names,
+                                zone_modes,
+                                zone_remaining);
 
     /* TouchGFX uses Fire_IsActive()/Fire_IsStartAllHoldActive() for priority
      * and forced main-screen switch. На панели реальную пожарную логику
      * заменяем этими RS-driven флагами. */
+    const uint8_t is_hold_idle =
+        (active != 0u && mode == 1u && n_zones == 0u) ? 1u : 0u;
+
     Fire_NotifyUiStatus(active, mode, remaining_s, n_zones);
-    if (MenuUi_IsMainScreenActive() != 0u) {
+    /* Удержание ПУСК ОБЩИЙ: обновлять главный экран даже до UI_NAV с меню. */
+    if (MenuUi_IsMainScreenActive() != 0u || is_hold_idle != 0u) {
         ModelListener* listener = model.getModelListener();
         if (listener != nullptr) {
             listener->onFireStatusChanged(model.getFireActive(),
@@ -107,7 +115,9 @@ extern "C" void PanelUiBridge_SetFireStatus(uint8_t active,
                                          0xFFu,
                                          model.getFireRemaining(),
                                          model.getFireZoneNameCount(),
-                                         model.getFireZoneNames());
+                                         model.getFireZoneNames(),
+                                         model.getFireZoneModes(),
+                                         model.getFireZoneRemaining());
         }
     }
 }

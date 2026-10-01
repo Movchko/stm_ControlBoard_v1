@@ -1,6 +1,7 @@
 #include <gui/mainscreen_screen/mainscreenView.hpp>
 #include <cstdio>
 #include <cstring>
+#include <cstddef>
 
 #ifndef SIMULATOR
 #include "main.h"
@@ -12,6 +13,7 @@
 #include "led.h"
 #include "menu_ui.h"
 #include "tick_time.h"
+#include "esp_manager.h"
 
 extern PPKYCfg PPKYConfig;
 
@@ -42,6 +44,8 @@ mainscreenView* g_main_view = nullptr;
 
 uint8_t s_fn_n = 0u;
 char s_fn_names[UI_LIST_CAPACITY][ZONE_NAME_SIZE + 1];
+uint8_t s_fn_modes[UI_LIST_CAPACITY];
+uint8_t s_fn_remaining[UI_LIST_CAPACITY];
 
 uint8_t s_an_n = 0u;
 char s_an_titles[UI_LIST_CAPACITY][WARNING_TITLE_LEN];
@@ -67,6 +71,7 @@ char s_config_overlay_text[32] = {0};
 uint8_t s_manual_browse = 0u;
 uint32_t s_nav_last_press_ms = 0u;
 uint8_t s_fire_mode = 0u;
+uint8_t s_fire_remaining = 0u;
 uint8_t s_fire_active = 0u;
 char s_fire_center_text[32] = {0};
 uint8_t s_start_all_hold_shown = 0u;
@@ -77,6 +82,9 @@ uint8_t s_gost_force_fire_redraw = 0u;
 UiBannerMode s_warn_marquee_banner = BANNER_NONE;
 uint8_t s_warn_marquee_idx = 0xFFu;
 char s_warn_marquee_text[ZONE_NAME_SIZE + 1] = {};
+/* Кэш бегущей пожара: иначе fireShowCurrentZone() каждый force сбрасывает прокрутку. */
+uint8_t s_fire_marquee_idx = 0xFFu;
+char s_fire_marquee_text[ZONE_NAME_SIZE + 1] = {};
 
 static void ui_invalidate_warn_marquee_cache(void)
 {
@@ -85,9 +93,17 @@ static void ui_invalidate_warn_marquee_cache(void)
 	s_warn_marquee_text[0] = '\0';
 }
 
+static void ui_invalidate_fire_marquee_cache(void)
+{
+	s_fire_marquee_idx = 0xFFu;
+	s_fire_marquee_text[0] = '\0';
+}
+
 static void ui_reset_banner_state(void)
 {
 	s_fn_n = 0u;
+	memset(s_fn_modes, 0, sizeof(s_fn_modes));
+	memset(s_fn_remaining, 0, sizeof(s_fn_remaining));
 	s_an_n = 0u;
 	s_wn_n = 0u;
 	s_mn_n = 0u;
@@ -102,6 +118,7 @@ static void ui_reset_banner_state(void)
 	s_manual_browse = 0u;
 	s_nav_last_press_ms = 0u;
 	s_fire_mode = 0u;
+	s_fire_remaining = 0u;
 	s_fire_active = 0u;
 	s_fire_center_text[0] = '\0';
 	s_start_all_hold_shown = 0u;
@@ -109,11 +126,64 @@ static void ui_reset_banner_state(void)
 	s_gost_force_fire_redraw = 0u;
 #endif
 	ui_invalidate_warn_marquee_cache();
+	ui_invalidate_fire_marquee_cache();
+}
+
+static uint8_t fire_zone_mode_at(uint8_t idx)
+{
+	if (idx < s_fn_n) {
+		return s_fn_modes[idx];
+	}
+	return s_fire_mode;
+}
+
+static uint8_t fire_zone_remaining_at(uint8_t idx)
+{
+	if (idx < s_fn_n) {
+		return s_fn_remaining[idx];
+	}
+	return 0u;
+}
+
+static void fire_fill_center_text(uint8_t mode, uint8_t remaining_s, char *buf, size_t buf_sz)
+{
+	if (buf == nullptr || buf_sz == 0u) {
+		return;
+	}
+	if (mode == 1u || mode == 5u) {
+		(void)snprintf(buf, buf_sz, "%uСЕК.", (unsigned)remaining_s);
+	} else if (mode == 2u) {
+		(void)snprintf(buf, buf_sz, "ТУШЕНИЕ");
+	} else if (mode == 3u) {
+		(void)snprintf(buf, buf_sz, "ТУШ.ВЫП.");
+	} else if (mode == 4u) {
+		(void)snprintf(buf, buf_sz, "ПОЖАР/ОСТ.");
+	} else if (mode == 6u) {
+		(void)snprintf(buf, buf_sz, "ПОЖАР1");
+	} else if (mode == 7u) {
+		(void)snprintf(buf, buf_sz, "ТУШ.ОШ.");
+	} else if (mode == 8u) {
+		(void)snprintf(buf, buf_sz, "ПУСК ЗАБЛ.");
+	} else if (mode == 9u) {
+		(void)snprintf(buf, buf_sz, "ТУШ.ОСТ.");
+	} else if (remaining_s > 0u) {
+		(void)snprintf(buf, buf_sz, "%uСЕК.", (unsigned)remaining_s);
+	} else {
+		buf[0] = '\0';
+	}
 }
 
 static bool ui_fire_blocks_events(void)
 {
-	return (s_fire_active != 0u && (s_fire_mode == 1u || s_fire_mode == 2u));
+	if (s_fire_active == 0u) {
+		return false;
+	}
+	for (uint8_t i = 0u; i < s_fn_n; ++i) {
+		if (s_fn_modes[i] == 1u || s_fn_modes[i] == 2u) {
+			return true;
+		}
+	}
+	return (s_fn_n == 0u && (s_fire_mode == 1u || s_fire_mode == 2u));
 }
 
 /* Удержание ПУСК ОБЩИЙ: по факту кнопки/FSM, а не по кэшу UI (иначе после отпускания
@@ -352,6 +422,11 @@ void mainscreenView::setupScreen()
 void mainscreenView::applyMuteIcon(bool soundOn)
 {
 #ifndef SIMULATOR
+	/* Пока в top bar заголовок ПОЖАР/АВАРИЯ — mute не показываем (иначе наложение). */
+	if (textAreatime_top_bar.isVisible()) {
+		customContainerTopBar1.setMuteVisible(false);
+		return;
+	}
 	customContainerTopBar1.setMuteVisible(!soundOn);
 #else
 	(void)soundOn;
@@ -361,6 +436,11 @@ void mainscreenView::applyMuteIcon(bool soundOn)
 void mainscreenView::applyWifiIcon(bool active)
 {
 #ifndef SIMULATOR
+	/* Мигающий wifi поверх «ПОЖАР n/m» / «АВАРИЯ n/m» — не показывать, пока заголовок. */
+	if (textAreatime_top_bar.isVisible()) {
+		customContainerTopBar1.setWifiVisible(false);
+		return;
+	}
 	customContainerTopBar1.setWifiVisible(active);
 #else
 	(void)active;
@@ -426,6 +506,9 @@ void mainscreenView::fireShowCurrentZone()
 		return;
 	}
 	s_banner_mode = BANNER_FIRE;
+	if (s_cur[BANNER_FIRE] >= s_fn_n) {
+		s_cur[BANNER_FIRE] = 0u;
+	}
 #if GOST_MODE
 	/* ГОСТ: статус центра привязан к показываемой зоне (домашняя = первая пришедшая). */
 	if (!s_manual_browse &&
@@ -434,52 +517,73 @@ void mainscreenView::fireShowCurrentZone()
 		s_cur[BANNER_FIRE] = 0u;
 	}
 	Fire_UiSetManualSelection(1u, s_cur[BANNER_FIRE]);
-	const bool multi = (s_fn_n > 1u);
-	const bool show_hdr = (multi || s_fire_mode == 1u || s_fire_mode == 5u ||
-			       s_fire_mode == 6u || s_fire_mode == 8u || s_manual_browse);
-	ui_set_warning_header_visible(this, show_hdr);
-	char hdr[24];
-	const char *base = "";
-	if (s_fire_mode == 1u) {
-		base = "ДО ПУСКА";
-	} else if (s_fire_mode == 5u) {
-		base = "ПАУЗА";
-	} else {
-		base = "ПОЖАР";
-	}
-	if (multi || s_manual_browse) {
-		snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
-			 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
-		uiSetTopHeaderText(hdr);
-	} else if (s_fire_mode == 1u || s_fire_mode == 5u) {
-		uiSetTopHeaderText(base);
-	} else if (s_fire_mode == 6u || s_fire_mode == 8u) {
-		uiSetTopHeaderText("");
+	{
+		const uint8_t hdr_mode = fire_zone_mode_at(s_cur[BANNER_FIRE]);
+		fire_fill_center_text(hdr_mode, fire_zone_remaining_at(s_cur[BANNER_FIRE]),
+				      s_fire_center_text, sizeof(s_fire_center_text));
+		const bool multi = (s_fn_n > 1u);
+		const bool show_hdr = (multi || hdr_mode == 1u || hdr_mode == 5u ||
+				       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
+		ui_set_warning_header_visible(this, show_hdr);
+		char hdr[24];
+		const char *base = "";
+		if (hdr_mode == 1u) {
+			base = "ДО ПУСКА";
+		} else if (hdr_mode == 5u) {
+			base = "ПАУЗА";
+		} else {
+			base = "ПОЖАР";
+		}
+		if (multi || s_manual_browse) {
+			snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
+				 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
+			uiSetTopHeaderText(hdr);
+		} else if (hdr_mode == 1u || hdr_mode == 5u) {
+			uiSetTopHeaderText(base);
+		} else if (hdr_mode == 6u || hdr_mode == 8u) {
+			uiSetTopHeaderText("");
+		}
 	}
 #else
-	const bool show_hdr = (s_fire_mode == 1u || s_fire_mode == 5u ||
-			       s_fire_mode == 6u || s_fire_mode == 8u || s_manual_browse);
-	ui_set_warning_header_visible(this, show_hdr);
-	char hdr[24];
-	const char *base = "";
-	if (s_fire_mode == 1u) {
-		base = "ДО ПУСКА";
-	} else if (s_fire_mode == 5u) {
-		base = "ПАУЗА";
-	} else if (s_manual_browse) {
-		base = "ПОЖАР";
-	}
-	if (s_manual_browse && base[0] != '\0') {
-		snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
-			 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
-		uiSetTopHeaderText(hdr);
-	} else if (base[0] != '\0') {
-		uiSetTopHeaderText(base);
-	} else if (s_fire_mode == 6u || s_fire_mode == 8u) {
-		uiSetTopHeaderText("");
+	{
+		const uint8_t hdr_mode = fire_zone_mode_at(s_cur[BANNER_FIRE]);
+		fire_fill_center_text(hdr_mode, fire_zone_remaining_at(s_cur[BANNER_FIRE]),
+				      s_fire_center_text, sizeof(s_fire_center_text));
+		const bool show_hdr = (hdr_mode == 1u || hdr_mode == 5u ||
+				       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
+		ui_set_warning_header_visible(this, show_hdr);
+		char hdr[24];
+		const char *base = "";
+		if (hdr_mode == 1u) {
+			base = "ДО ПУСКА";
+		} else if (hdr_mode == 5u) {
+			base = "ПАУЗА";
+		} else if (s_manual_browse) {
+			base = "ПОЖАР";
+		}
+		if (s_manual_browse && base[0] != '\0') {
+			snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
+				 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
+			uiSetTopHeaderText(hdr);
+		} else if (base[0] != '\0') {
+			uiSetTopHeaderText(base);
+		} else if (hdr_mode == 6u || hdr_mode == 8u) {
+			uiSetTopHeaderText("");
+		}
 	}
 #endif
-	CustomContainerSrollText.setText(s_fn_names[s_cur[BANNER_FIRE]]);
+	{
+		const uint8_t fi = s_cur[BANNER_FIRE];
+		const bool same_fire_marquee =
+			(s_fire_marquee_idx == fi &&
+			 std::strncmp(s_fire_marquee_text, s_fn_names[fi], ZONE_NAME_SIZE + 1) == 0);
+		if (!same_fire_marquee) {
+			s_fire_marquee_idx = fi;
+			std::strncpy(s_fire_marquee_text, s_fn_names[fi], ZONE_NAME_SIZE);
+			s_fire_marquee_text[ZONE_NAME_SIZE] = '\0';
+			CustomContainerSrollText.setText(s_fn_names[fi]);
+		}
+	}
 	ui_invalidate_warn_marquee_cache();
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(s_fire_center_text), textArea1Buffer, TEXTAREA1_SIZE);
@@ -651,16 +755,32 @@ void mainscreenView::uiSetWarningHeaderVisible(bool visible)
 	}
 	if (textAreatime_top_bar.isVisible() == visible) {
 		if (visible) {
+			/* Заголовок уже есть — top bar с wifi/mute всё равно не должен перекрывать. */
+			if (customContainerTopBar1.isVisible()) {
+				customContainerTopBar1.setVisible(false);
+				customContainerTopBar1.invalidate();
+			}
 			textAreatime_top_bar.invalidate();
 		}
 		return;
 	}
-	customContainerTopBar1.setVisible(true);
+	/* Заголовок на всю ширину: прячем top bar (wifi/mute + чёрный iconsBackground). */
+	customContainerTopBar1.setVisible(!visible);
 	customContainerTopBar1.invalidate();
 	customContainerScrollTime1.setVisible(!visible);
 	customContainerScrollTime1.invalidate();
 	textAreatime_top_bar.setVisible(visible);
 	textAreatime_top_bar.invalidate();
+#ifndef SIMULATOR
+	if (!visible) {
+		/* Вернуть mute/wifi после ухода с заголовка. */
+		applyMuteIcon(PPKYConfig.beep != 0u);
+		applyWifiIcon(EspManager_IsWifiIconVisible(HAL_GetTick()) != 0u);
+	} else {
+		customContainerTopBar1.setWifiVisible(false);
+		customContainerTopBar1.setMuteVisible(false);
+	}
+#endif
 }
 
 void mainscreenView::uiUpdateWarningHeader(uint8_t cur_idx, uint8_t total)
@@ -721,9 +841,10 @@ void mainscreenView::uiShowConfigOverlay(const char* center_text)
 
 void mainscreenView::uiShowStartAllHoldTimer(const char* center_text)
 {
-	ui_set_warning_header_visible(this, false);
+	ui_set_warning_header_visible(this, true);
+	uiSetTopHeaderText("ДО ПУСКА");
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
-	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "3С";
+	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "3СЕК.";
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(txt), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 	textArea1.setWildcard(textArea1Buffer);
@@ -734,7 +855,8 @@ void mainscreenView::uiShowStartAllHoldTimer(const char* center_text)
 }
 
 void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s,
-				      uint8_t nZoneNames, char (*zoneNames)[ZONE_NAME_SIZE + 1])
+				      uint8_t nZoneNames, char (*zoneNames)[ZONE_NAME_SIZE + 1],
+				      const uint8_t *zoneModes, const uint8_t *zoneRemaining)
 {
 	(void)zone;
 	/* Model::tick шлёт статус каждый кадр — force только при реальном уходе с пожара,
@@ -743,10 +865,18 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 	fireUiActive = active;
 	s_fire_active = active ? 1u : 0u;
 	s_fire_mode = mode;
+	s_fire_remaining = remaining_s;
 	if (nZoneNames > UI_LIST_CAPACITY) {
 		nZoneNames = UI_LIST_CAPACITY;
 	}
 	const uint8_t old_n = s_fn_n;
+	uint8_t old_cur_mode = 0xffu;
+	{
+		uint8_t old_idx = s_cur[BANNER_FIRE];
+		if (old_idx < old_n) {
+			old_cur_mode = s_fn_modes[old_idx];
+		}
+	}
 	bool changed = nZoneNames != s_fn_n;
 	for (uint8_t i = 0u; i < nZoneNames && !changed; ++i) {
 		changed = std::strncmp(s_fn_names[i], zoneNames[i], ZONE_NAME_SIZE + 1) != 0;
@@ -783,15 +913,25 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 	s_fn_n = active ? nZoneNames : 0u;
 	static uint8_t last_mode = 0xffu;
 	static uint8_t last_remaining = 0xffu;
-	if (changed && active) {
+	if (active) {
 		for (uint8_t i = 0u; i < s_fn_n; ++i) {
-			std::strncpy(s_fn_names[i], zoneNames[i], ZONE_NAME_SIZE);
-			s_fn_names[i][ZONE_NAME_SIZE] = '\0';
+			if (changed) {
+				std::strncpy(s_fn_names[i], zoneNames[i], ZONE_NAME_SIZE);
+				s_fn_names[i][ZONE_NAME_SIZE] = '\0';
+			}
+			s_fn_modes[i] = (zoneModes != nullptr) ? zoneModes[i] : mode;
+			s_fn_remaining[i] = (zoneRemaining != nullptr) ? zoneRemaining[i] : remaining_s;
 		}
 		if (s_cur[BANNER_FIRE] >= s_fn_n) {
 			s_cur[BANNER_FIRE] = 0u;
 		}
+	} else {
+		memset(s_fn_modes, 0, sizeof(s_fn_modes));
+		memset(s_fn_remaining, 0, sizeof(s_fn_remaining));
+	}
+	if (changed && active) {
 		ui_clear_phase(BANNER_FIRE);
+		ui_invalidate_fire_marquee_cache();
 #if GOST_MODE
 		if (need_flash) {
 			ui_request_new_event(BANNER_FIRE, flash_idx);
@@ -809,6 +949,7 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 			s_banner_mode = BANNER_NONE;
 		}
 		s_fire_center_text[0] = '\0';
+		ui_invalidate_fire_marquee_cache();
 		if (leaving_fire) {
 			last_mode = 0xffu;
 			last_remaining = 0xffu;
@@ -817,24 +958,40 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		return;
 	}
 #if GOST_MODE
-	const bool mode_changed = (mode != last_mode);
+	uint8_t zmode;
+	uint8_t zrem;
+	uint8_t idx = s_cur[BANNER_FIRE];
+	if (idx >= s_fn_n) {
+		idx = 0u;
+	}
+	if (s_fn_n == 0u || Fire_IsStartAllHoldActive() != 0u) {
+		zmode = mode;
+		zrem = remaining_s;
+	} else {
+		zmode = fire_zone_mode_at(idx);
+		zrem = fire_zone_remaining_at(idx);
+	}
+	const bool zone_mode_changed = (zmode != old_cur_mode);
+#else
+	uint8_t idx = s_cur[BANNER_FIRE];
+	if (idx >= s_fn_n) {
+		idx = 0u;
+	}
+	uint8_t zmode;
+	uint8_t zrem;
+	if (s_fn_n == 0u || Fire_IsStartAllHoldActive() != 0u) {
+		zmode = mode;
+		zrem = remaining_s;
+	} else {
+		zmode = fire_zone_mode_at(idx);
+		zrem = fire_zone_remaining_at(idx);
+	}
+	(void)old_cur_mode;
 #endif
-	if (mode != last_mode || remaining_s != last_remaining || s_banner_mode == BANNER_FIRE) {
-		last_mode = mode;
-		last_remaining = remaining_s;
-		char buf[32];
-		if (mode == 1u || mode == 5u) snprintf(buf, sizeof(buf), "%uС", (unsigned)remaining_s);
-		else if (mode == 2u) snprintf(buf, sizeof(buf), "ТУШЕНИЕ");
-		else if (mode == 3u) snprintf(buf, sizeof(buf), "ТУШ.ВЫП.");
-		else if (mode == 4u) snprintf(buf, sizeof(buf), "ПОЖАР/ОСТ.");
-		else if (mode == 6u) snprintf(buf, sizeof(buf), "ПОЖАР1");
-		else if (mode == 7u) snprintf(buf, sizeof(buf), "ТУШ.ОШ.");
-		else if (mode == 8u) snprintf(buf, sizeof(buf), "ПУСК ЗАБЛ.");
-		else if (mode == 9u) snprintf(buf, sizeof(buf), "ТУШ.ОСТ.");
-		else if (remaining_s > 0u) snprintf(buf, sizeof(buf), "%u", (unsigned)remaining_s);
-		else buf[0] = '\0';
-		std::strncpy(s_fire_center_text, buf, sizeof(s_fire_center_text) - 1u);
-		s_fire_center_text[sizeof(s_fire_center_text) - 1u] = '\0';
+	if (zmode != last_mode || zrem != last_remaining || s_banner_mode == BANNER_FIRE) {
+		last_mode = zmode;
+		last_remaining = zrem;
+		fire_fill_center_text(zmode, zrem, s_fire_center_text, sizeof(s_fire_center_text));
 		if (s_banner_mode == BANNER_FIRE) {
 			memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
 			Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(s_fire_center_text), textArea1Buffer, TEXTAREA1_SIZE);
@@ -844,13 +1001,9 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		}
 	}
 #if GOST_MODE
-	/* Смена статуса (тушение/останов/…) — тоже новое сообщение на 5 с. */
+	/* Смена статуса текущей зоны (тушение/останов/…) — тоже новое сообщение на 5 с. */
 	bool status_flash = false;
-	if (mode_changed && mode != 0u && !need_flash) {
-		uint8_t idx = s_cur[BANNER_FIRE];
-		if (idx >= s_fn_n) {
-			idx = 0u;
-		}
+	if (zone_mode_changed && zmode != 0u && !need_flash) {
 		ui_request_new_event(BANNER_FIRE, idx);
 		status_flash = true;
 	}

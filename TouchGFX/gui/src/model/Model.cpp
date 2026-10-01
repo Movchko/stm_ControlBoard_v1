@@ -108,7 +108,9 @@ void Model::notifySoundToggled(bool soundOn)
 }
 
 void Model::setFireStatusFromApp(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-				 char (*zoneNames)[ZONE_NAME_SIZE + 1])
+				 char (*zoneNames)[ZONE_NAME_SIZE + 1],
+				 const uint8_t *zoneModes,
+				 const uint8_t *zoneRemaining)
 {
 	fireActive = active;
 	fireMode = mode;
@@ -120,12 +122,16 @@ void Model::setFireStatusFromApp(bool active, uint8_t mode, uint8_t zone, uint8_
 	fireZoneNameCount = nZoneNames;
 	if (nZoneNames == 0u) {
 		std::memset(fireZoneNames, 0, sizeof(fireZoneNames));
+		std::memset(fireZoneModes, 0, sizeof(fireZoneModes));
+		std::memset(fireZoneRemaining, 0, sizeof(fireZoneRemaining));
 		/* Не выходим раньше: active/mode/remaining уже обновлены (сброс таймера ПУСК ОБЩИЙ). */
 		return;
 	}
 	for (uint8_t i = 0u; i < nZoneNames; i++) {
 		std::strncpy(fireZoneNames[i], zoneNames[i], ZONE_NAME_SIZE);
 		fireZoneNames[i][ZONE_NAME_SIZE] = '\0';
+		fireZoneModes[i] = (zoneModes != nullptr) ? zoneModes[i] : mode;
+		fireZoneRemaining[i] = (zoneRemaining != nullptr) ? zoneRemaining[i] : remaining_s;
 	}
 }
 

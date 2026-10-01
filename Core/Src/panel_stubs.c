@@ -8,6 +8,7 @@
 #include "event_log_reader.h"
 #include "device_config.h"
 #include "panel_cfg.h"
+#include "panel_state.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -28,8 +29,6 @@ static uint8_t s_start_all_hold_active = 0u; /* аналог Fire_IsStartAllHold
 
 void Fire_NotifyUiStatus(uint8_t ui_active, uint8_t mode, uint8_t remaining_s, uint8_t n_zones)
 {
-	(void)remaining_s;
-
 	s_ui_fire_active = (ui_active != 0u) ? 1u : 0u;
 	if (s_ui_fire_active == 0u) {
 		s_fire_is_active = 0u;
@@ -47,10 +46,16 @@ void Fire_NotifyUiStatus(uint8_t ui_active, uint8_t mode, uint8_t remaining_s, u
 	s_fire_is_active = is_hold_idle ? 0u : 1u;
 
 	/* Fire_IsStartAllHoldActive() в v1 = g_fire.all_hold_active.
-	 * В UI обновлениях это состояние проявляется:
-	 * - hold-idle: mode==1 && n_zones==0
-	 * - hold при активном сценарии: mode==0 (ui_mode остаётся 0 в ветке all_hold_active<3s) */
-	s_start_all_hold_active = is_hold_idle;
+	 * На панели: hold-idle = mode 1, список зон пуст; при активном пожаре
+	 * ППКУ 2 тоже шлёт mode 1 и remaining 3..1 на время удержания. */
+	if (is_hold_idle != 0u) {
+		s_start_all_hold_active = 1u;
+	} else if (mode == 1u && remaining_s >= 1u && remaining_s <= 3u) {
+		s_start_all_hold_active = 1u;
+	} else {
+		/* Иначе обязательно сброс: иначе после пуска hold-флаг залипает. */
+		s_start_all_hold_active = 0u;
+	}
 }
 
 /* Локальный конфиг панели (DevicePanelConfig) — Flash сектор CFG.
@@ -79,10 +84,19 @@ uint8_t Fire_IsActive(void) { return s_fire_is_active; }
 uint8_t Fire_HasExtinguishIncomplete(void) { return 0u; }
 uint8_t Fire_IsStartAllHoldActive(void) { return s_start_all_hold_active; }
 uint8_t Fire_IsExtinguishIndicationActive(void) { return 0u; }
+uint8_t Fire_GetPanelFireLedMode(void) { return 0u; }
 void Fire_UiSetManualSelection(uint8_t enabled, uint8_t selected_ui_index)
 {
-	(void)enabled;
-	(void)selected_ui_index;
+	static uint8_t last_en = 0xFFu;
+	static uint8_t last_idx = 0xFFu;
+	uint8_t en = enabled ? 1u : 0u;
+
+	if (en == last_en && selected_ui_index == last_idx) {
+		return;
+	}
+	last_en = en;
+	last_idx = selected_ui_index;
+	PanelState_QueueUiEvent(RS_PANEL_UI_EVT_FIRE_SELECT, (uint16_t)en, (uint16_t)selected_ui_index);
 }
 void Fire_NotifyZoneModeChanged(void) {}
 

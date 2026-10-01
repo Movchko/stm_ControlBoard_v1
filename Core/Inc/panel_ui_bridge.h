@@ -13,7 +13,9 @@ void PanelUiBridge_SetFireStatus(uint8_t active,
                                  uint8_t mode,
                                  uint8_t remaining_s,
                                  uint8_t n_zones,
-                                 char (*zone_names)[ZONE_NAME_SIZE + 1]);
+                                 char (*zone_names)[ZONE_NAME_SIZE + 1],
+                                 const uint8_t *zone_modes,
+                                 const uint8_t *zone_remaining);
 void PanelUiBridge_SetWarningStatus(uint8_t active,
                                     uint8_t n_items,
                                     char (*titles)[24],

@@ -33,7 +33,9 @@ void mainscreenPresenter::activate()
                               0xFFu,
                               model->getFireRemaining(),
                               model->getFireZoneNameCount(),
-                              model->getFireZoneNames());
+                              model->getFireZoneNames(),
+                              model->getFireZoneModes(),
+                              model->getFireZoneRemaining());
         view.updateWarningStatus(model->getWarningActive(),
                                  model->getWarningCount(),
                                  const_cast<char (*)[WARNING_TITLE_LEN]>(model->getWarningBigTitles()),
@@ -76,9 +78,11 @@ void mainscreenPresenter::handleButton(uint8_t but, uint8_t state)
 }
 
 void mainscreenPresenter::onFireStatusChanged(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-					      char (*zoneNames)[ZONE_NAME_SIZE + 1])
+					      char (*zoneNames)[ZONE_NAME_SIZE + 1],
+					      const uint8_t *zoneModes,
+					      const uint8_t *zoneRemaining)
 {
-	view.updateFireStatus(active, mode, zone, remaining_s, nZoneNames, zoneNames);
+	view.updateFireStatus(active, mode, zone, remaining_s, nZoneNames, zoneNames, zoneModes, zoneRemaining);
 }
 
 void mainscreenPresenter::onWarningStatusChanged(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
@@ -119,7 +123,9 @@ void mainscreenPresenter::onAppTick()
                                       0xFFu,
                                       model->getFireRemaining(),
                                       model->getFireZoneNameCount(),
-                                      model->getFireZoneNames());
+                                      model->getFireZoneNames(),
+                                      model->getFireZoneModes(),
+                                      model->getFireZoneRemaining());
                 view.updateWarningStatus(model->getWarningActive(),
                                          model->getWarningCount(),
                                          const_cast<char (*)[WARNING_TITLE_LEN]>(model->getWarningBigTitles()),

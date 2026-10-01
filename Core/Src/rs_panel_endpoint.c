@@ -1,6 +1,5 @@
 #include "rs_panel_endpoint.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "beeper.h"
@@ -10,11 +9,13 @@
 #include "led.h"
 #include "main.h"
 #include "menu_ui.h"
-#include "panel_app.h"
 #include "panel_cfg.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
 #include "rs_panel_debug.h"
+#include "Display/display.h"
+#include "backend.h"
+#include "upd.h"
 
 extern PPKYCfg PPKYConfig;
 extern UART_HandleTypeDef huart4;
@@ -55,7 +56,6 @@ extern void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
 static RsPanelEndpoint g_endpoint;
 static uint32_t g_activity_accum_ms = 0u;
 static uint32_t g_uptime_sec = 0u;
-static volatile uint8_t g_enter_bootloader_pending = 0u;
 
 typedef struct {
     uint8_t active;
@@ -63,6 +63,8 @@ typedef struct {
     uint8_t remaining_s;
     uint8_t n_zones;
     char zone_names[16][ZONE_NAME_SIZE + 1];
+    uint8_t zone_modes[16];
+    uint8_t zone_remaining[16];
 } DeferredFireUi;
 
 typedef struct {
@@ -76,6 +78,13 @@ static DeferredFireUi s_deferred_fire;
 static DeferredWarnUi s_deferred_warn;
 static volatile uint8_t s_fire_pending;
 static volatile uint8_t s_warn_pending;
+static uint8_t s_warn_ui_active = 0u;
+static uint8_t s_warn_ui_has_fault = 0u;
+/* MAIN_FIRE hold ПУСК ОБЩИЙ (mode=1, n_zones=0): не гасить NORM по fire_active. */
+static uint8_t s_fire_hold_idle = 0u;
+
+/* 0x01 в первом байте title — маркер ВНИМАНИЕ (WARN_TITLE_MARK_ATTN на ППКУ). */
+#define PANEL_WARN_TITLE_MARK_ATTN 0x01u
 
 typedef struct {
     uint16_t screen_id;
@@ -107,7 +116,9 @@ static void rs_queue_fire_ui(uint8_t active,
                              uint8_t mode,
                              uint8_t remaining_s,
                              uint8_t n_zones,
-                             char (*zone_names)[ZONE_NAME_SIZE + 1])
+                             char (*zone_names)[ZONE_NAME_SIZE + 1],
+                             const uint8_t *zone_modes,
+                             const uint8_t *zone_remaining)
 {
     uint8_t i;
 
@@ -119,10 +130,14 @@ static void rs_queue_fire_ui(uint8_t active,
     }
     s_deferred_fire.n_zones = n_zones;
     memset(s_deferred_fire.zone_names, 0, sizeof(s_deferred_fire.zone_names));
+    memset(s_deferred_fire.zone_modes, 0, sizeof(s_deferred_fire.zone_modes));
+    memset(s_deferred_fire.zone_remaining, 0, sizeof(s_deferred_fire.zone_remaining));
     if (zone_names != 0) {
         for (i = 0u; i < n_zones; i++) {
             memcpy(s_deferred_fire.zone_names[i], zone_names[i], ZONE_NAME_SIZE);
             s_deferred_fire.zone_names[i][ZONE_NAME_SIZE] = '\0';
+            s_deferred_fire.zone_modes[i] = (zone_modes != 0) ? zone_modes[i] : mode;
+            s_deferred_fire.zone_remaining[i] = (zone_remaining != 0) ? zone_remaining[i] : remaining_s;
         }
     }
     s_fire_pending = 1u;
@@ -174,7 +189,9 @@ void RsPanelEndpoint_ProcessDeferredUi(void)
                                     s_deferred_fire.mode,
                                     s_deferred_fire.remaining_s,
                                     s_deferred_fire.n_zones,
-                                    s_deferred_fire.zone_names);
+                                    s_deferred_fire.zone_names,
+                                    s_deferred_fire.zone_modes,
+                                    s_deferred_fire.zone_remaining);
     }
 }
 
@@ -450,10 +467,16 @@ static void rs_apply_leds(const RsPanelLedCmd *cmd)
             break;
         case RS_PANEL_LED_MODE_BLINK:
             Led_Set(led, 2u);
+            /* Иначе мигание идёт с тусклой/нулевой яркостью после IDLE. */
+            Led_SetBrightness(led, LED_BUT_MAX_BRIGHTNESS);
+            Led_ForceStatusBright(led);
             break;
         case RS_PANEL_LED_MODE_BRIGHT:
             Led_Set(led, 1u);
             Led_SetBrightness(led, cmd->items[i].value);
+            if (led == LED_START) {
+                Led_ForceStatusBright(led);
+            }
             break;
         default:
             break;
@@ -580,6 +603,32 @@ static void rs_apply_datetime(const RsPanelTimeCmd *cmd)
     RtcCache_Refresh();
 }
 
+static void rs_sync_status_leds(uint8_t warn_active, uint8_t warn_has_fault, uint8_t fire_active)
+{
+    /* Экран WARN/FIRE — источник истины для NORM/ERR, если CMD_LED от хоста
+     * не дошёл или ушёл со старым NORM=ON в том же тике. */
+    if (fire_active != 0u || warn_active != 0u) {
+        Led_Set(LED_NORM, 0u);
+    } else {
+        Led_Set(LED_NORM, 1u);
+    }
+
+    /* Сброс пожара (MAIN_FIRE active=0): погасить ПОЖАР/ПУСК/ОСТ.ПУСК даже если
+     * CMD_LED с OFF потерялся. ВНИМАНИЕ хост вернёт следующим CMD_LED. */
+    if (fire_active == 0u) {
+        Led_Set(LED_FIRE, 0u);
+        Led_Set(LED_START, 0u);
+        Led_Set(LED_STOP, 0u);
+    }
+
+    if (warn_has_fault != 0u) {
+        Led_Set(LED_ERR, 1u);
+        Led_ForceStatusBright(LED_ERR);
+    } else {
+        Led_Set(LED_ERR, 0u);
+    }
+}
+
 static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload, uint16_t len)
 {
     uint16_t pos = 0u;
@@ -588,29 +637,58 @@ static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload,
     uint8_t remaining_s;
     uint8_t n_zones;
     uint8_t i;
+    uint8_t parsed = 0u;
+    uint8_t use_per_zone = 0u;
     char zone_names[16][ZONE_NAME_SIZE + 1];
+    uint8_t zone_modes[16];
+    uint8_t zone_remaining[16];
 
     if (state == 0 || payload == 0 || len < 5u) {
         return;
     }
 
     memset(zone_names, 0, sizeof(zone_names));
+    memset(zone_modes, 0, sizeof(zone_modes));
+    memset(zone_remaining, 0, sizeof(zone_remaining));
     active = (uint8_t)(payload[pos++] & 0x01u);
     state->fire_active = active;
     mode = payload[pos++];
     remaining_s = payload[pos++];
-    pos++; /* sel_index */
+    pos++; /* sel_index: выбор зоны ведёт панель через FIRE_SELECT */
     n_zones = payload[pos++];
     if (n_zones > 16u) {
         n_zones = 16u;
     }
+    {
+        uint16_t p_new = pos;
+        uint8_t i2;
+        uint8_t ok_new = 1u;
+        for (i2 = 0u; i2 < n_zones; i2++) {
+            uint8_t sl;
+            if (p_new >= len) {
+                ok_new = 0u;
+                break;
+            }
+            sl = payload[p_new++];
+            if ((uint16_t)(p_new + sl + 2u) > len) {
+                ok_new = 0u;
+                break;
+            }
+            p_new = (uint16_t)(p_new + sl + 2u);
+        }
+        if (ok_new != 0u && p_new == len) {
+            use_per_zone = 1u;
+        }
+    }
     for (i = 0u; i < n_zones; i++) {
         uint8_t str_len;
+        uint8_t raw_len;
         if (pos >= len) {
             break;
         }
-        str_len = payload[pos++];
-        if ((uint16_t)(pos + str_len) > len) {
+        raw_len = payload[pos++];
+        str_len = raw_len;
+        if ((uint16_t)(pos + raw_len) > len) {
             break;
         }
         if (str_len > ZONE_NAME_SIZE) {
@@ -618,10 +696,24 @@ static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload,
         }
         memcpy(zone_names[i], &payload[pos], str_len);
         zone_names[i][str_len] = '\0';
-        pos = (uint16_t)(pos + payload[pos - 1u]);
+        pos = (uint16_t)(pos + raw_len);
+        if (use_per_zone != 0u && (uint16_t)(pos + 2u) <= len) {
+            zone_modes[i] = payload[pos++];
+            zone_remaining[i] = payload[pos++];
+        } else {
+            zone_modes[i] = mode;
+            zone_remaining[i] = remaining_s;
+        }
+        parsed++;
     }
+    n_zones = parsed;
 
-    rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names);
+    /* Hold ПУСК ОБЩИЙ из IDLE: MAIN_FIRE active=1 (таймер), но FSM на хосте IDLE —
+     * CMD_LED держит NORM=ON. Не гасить NORM по active=1, иначе NORM мигает. */
+    s_fire_hold_idle = (active != 0u && mode == 1u && n_zones == 0u) ? 1u : 0u;
+    rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault,
+                        (s_fire_hold_idle != 0u) ? 0u : active);
+    rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names, zone_modes, zone_remaining);
 }
 
 static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload, uint16_t len)
@@ -683,6 +775,22 @@ static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload,
     g_rs_panel_dbg.last_warn_active = ((count != 0u) && (i != 0u)) ? 1u : 0u;
     g_rs_panel_dbg.last_warn_n_items = i;
     g_rs_panel_dbg.host_warn_data_rx++;
+
+    {
+        uint8_t has_fault = 0u;
+        uint8_t j;
+        for (j = 0u; j < i; j++) {
+            /* ВНИМАНИЕ: title[0]==0x01; неисправность — без маркера. */
+            if (state->warning_titles[j][0] != (char)PANEL_WARN_TITLE_MARK_ATTN) {
+                has_fault = 1u;
+                break;
+            }
+        }
+        s_warn_ui_active = g_rs_panel_dbg.last_warn_active;
+        s_warn_ui_has_fault = (g_rs_panel_dbg.last_warn_active != 0u) ? has_fault : 0u;
+        rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault,
+                            (s_fire_hold_idle != 0u) ? 0u : state->fire_active);
+    }
 
     rs_queue_warn_ui(g_rs_panel_dbg.last_warn_active,
                      i,
@@ -1013,18 +1121,19 @@ static void rs_apply_assign_by_uid(RsPanelEndpoint *endpoint, const uint8_t *pay
 
 static void rs_send_version(RsPanelEndpoint *endpoint)
 {
-    char ver[32];
-    int n;
+    const char *ver;
+    size_t n;
 
     if (endpoint == 0) {
         return;
     }
-    n = snprintf(ver, sizeof(ver), "fw=%u", (unsigned)PANEL_APP_VERSION_U32);
-    if (n <= 0) {
+    ver = GetAppVersion();
+    if (ver == 0) {
         return;
     }
-    if (n >= (int)sizeof(ver)) {
-        n = (int)sizeof(ver) - 1;
+    n = strlen(ver);
+    if (n == 0u || n > 0xFFFFu) {
+        return;
     }
     rs_bus_send_frame(endpoint,
                       endpoint->panel_addr,
@@ -1189,10 +1298,9 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         break;
     case RS_PANEL_CMD_ENTER_BOOTLOADER:
-        /* ACK из RX IRQ; reset — из Timer10ms (не Delay/Reset в callback UART). */
+        /* ACK из RX IRQ; reset — из PanelUpd_Timer10ms (не Delay/Reset в callback UART). */
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-        PanelBoot_SetUpdateRequest(endpoint->panel_addr);
-        g_enter_bootloader_pending = 1u;
+        PanelUpd_RequestEnterBootloader(endpoint->panel_addr);
         break;
     case RS_PANEL_CMD_DISCOVER:
         /* Ответ со случайной задержкой — из Timer10ms (не TX из RX IRQ пачкой). */
@@ -1225,6 +1333,8 @@ void RsPanelEndpoint_Init(void)
     PanelBoot_SetRsAddr(g_endpoint.panel_addr);
     g_endpoint.next_tx_seq = 1u;
     PanelState_Init(&g_endpoint.state);
+    /* OLED remap после чтения Flash (type3 → A0/C0). */
+    Display_ApplyPanelType(PanelCfg_Get()->panel_type);
     RsBus_Init(&g_endpoint.bus, &huart4, BRP_485_EN_GPIO_Port, BRP_485_EN_Pin, rs_endpoint_on_frame, &g_endpoint);
 }
 
@@ -1232,10 +1342,7 @@ void RsPanelEndpoint_Timer10ms(void)
 {
     /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
      * иначе WARN попадает в уничтожаемый view, а setupScreen снова рисует «НОРМА». */
-    if (g_enter_bootloader_pending != 0u) {
-        g_enter_bootloader_pending = 0u;
-        NVIC_SystemReset();
-    }
+    PanelUpd_Timer10ms();
     if (g_endpoint.discover_pending != 0u) {
         if (g_endpoint.discover_delay_ticks > 0u) {
             g_endpoint.discover_delay_ticks--;

@@ -36,7 +36,9 @@ public:
 
     /** Обновление состояния пожара для главного экрана. */
     virtual void onFireStatusChanged(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-				     char (*zoneNames)[ZONE_NAME_SIZE + 1]) override;
+				     char (*zoneNames)[ZONE_NAME_SIZE + 1],
+				     const uint8_t *zoneModes,
+				     const uint8_t *zoneRemaining) override;
     virtual void onWarningStatusChanged(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
 					char (*details)[ZONE_NAME_SIZE + 1]) override;
     virtual void onSoundOnChanged(bool soundOn) override;

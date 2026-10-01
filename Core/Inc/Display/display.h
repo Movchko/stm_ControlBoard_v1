@@ -16,6 +16,8 @@ extern "C" {
 
 // Display initialization
 void InitDisplay(void);
+/* Segment/COM remap: type3 (вертикальная малая) → A0/C0, иначе A1/C8. */
+void Display_ApplyPanelType(uint8_t panel_type);
 
 // Basic SPI communication functions
 void Write_Cmd(uint8_t cmd);

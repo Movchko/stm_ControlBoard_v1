@@ -35,6 +35,8 @@ void PanelState_SampleButtons(PanelStateContext *ctx);
 void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp);
 /* 1 = был запрос на пересылку CAPS; сбрасывает флаг. */
 uint8_t PanelState_TakeCapsResyncPending(PanelStateContext *ctx);
+/* Выбор зоны пожара на главном экране → UI_EVT_FIRE_SELECT на ППКУ2. */
+void PanelState_QueueUiEvent(uint8_t evt_type, uint16_t p1, uint16_t p2);
 
 #ifdef __cplusplus
 }

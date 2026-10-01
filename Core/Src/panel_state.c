@@ -2,10 +2,12 @@
 
 #include <string.h>
 
+#include "Display/display.h"
 #include "menu_ui.h"
 #include "panel_app.h"
 #include "panel_cfg.h"
 #include "rs_panel_debug.h"
+#include "upd.h"
 
 static void panel_state_fill_caps(PanelStateContext *ctx);
 static void panel_state_promote_to_big(PanelStateContext *ctx);
@@ -273,15 +275,26 @@ static void panel_state_push_connection_ui_event(PanelStateContext *ctx, uint8_t
     }
 }
 
+static PanelStateContext *s_active_ctx;
+
 void PanelState_Init(PanelStateContext *ctx)
 {
     if (ctx == 0) {
         return;
     }
+    s_active_ctx = ctx;
     memset(ctx, 0, sizeof(*ctx));
     panel_state_fill_caps(ctx);
     ctx->current_screen = RS_PANEL_SCREEN_LOGO;
     ctx->fire_active = 0u;
+}
+
+void PanelState_QueueUiEvent(uint8_t evt_type, uint16_t p1, uint16_t p2)
+{
+    if (s_active_ctx == 0) {
+        return;
+    }
+    panel_state_push_ui(s_active_ctx, evt_type, p1, p2);
 }
 
 static void panel_state_fill_caps(PanelStateContext *ctx)
@@ -338,11 +351,11 @@ static void panel_state_fill_caps(PanelStateContext *ctx)
         return;
     }
     pcfg = PanelCfg_Get();
-    is_small = (pcfg->panel_type == PANEL_TYPE_SMALL) ? 1u : 0u;
+    is_small = PANEL_TYPE_IS_SMALL(pcfg->panel_type) ? 1u : 0u;
 
-    ctx->caps.fw_ver = (uint16_t)PANEL_APP_VERSION_U32;
+    ctx->caps.fw_ver = (uint16_t)GetAppVersionU32();
     ctx->caps.hw_id = 1u;
-    ctx->caps.ui_profile = (is_small != 0u) ? PANEL_TYPE_SMALL : PANEL_TYPE_BIG;
+    ctx->caps.ui_profile = PANEL_TYPE_NORMALIZE(pcfg->panel_type);
     ctx->caps.disp_w = 128u;
     ctx->caps.disp_h = 64u;
     if (is_small != 0u) {
@@ -364,14 +377,15 @@ static void panel_state_fill_caps(PanelStateContext *ctx)
 
 static void panel_state_promote_to_big(PanelStateContext *ctx)
 {
-    if (ctx == 0 || g_panel_cfg.panel_type == PANEL_TYPE_BIG) {
+    if (ctx == 0 || PANEL_TYPE_IS_BIG(g_panel_cfg.panel_type)) {
         return;
     }
-    g_panel_cfg.panel_type = PANEL_TYPE_BIG;
+    g_panel_cfg.panel_type = PANEL_TYPE_1;
     /* START_ALL = RsBtnType 0x07 → бит 6 */
     g_panel_cfg.btn_enable = (uint8_t)(g_panel_cfg.btn_enable | (uint8_t)(1u << 6));
     PanelCfg_Save();
     panel_state_fill_caps(ctx);
+    Display_ApplyPanelType(g_panel_cfg.panel_type);
     ctx->caps_resync_pending = 1u;
 }
 
@@ -437,16 +451,18 @@ void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetC
         }
         break;
     case RS_PANEL_PROFILE_SET_PANEL_TYPE:
-        if (cmd->value.panel_type == PANEL_TYPE_BIG ||
-            cmd->value.panel_type == PANEL_TYPE_SMALL) {
+        if (cmd->value.panel_type == PANEL_TYPE_1 ||
+            cmd->value.panel_type == PANEL_TYPE_2 ||
+            cmd->value.panel_type == PANEL_TYPE_3) {
             g_panel_cfg.panel_type = cmd->value.panel_type;
             /* btn_enable: бит N = RsBtnType (N+1); START_ALL=0x07 → бит 6. */
-            if (g_panel_cfg.panel_type == PANEL_TYPE_SMALL) {
+            if (PANEL_TYPE_IS_SMALL(g_panel_cfg.panel_type)) {
                 g_panel_cfg.btn_enable = (uint8_t)(g_panel_cfg.btn_enable & (uint8_t)~(1u << 6));
             } else {
                 g_panel_cfg.btn_enable = (uint8_t)(g_panel_cfg.btn_enable | (uint8_t)(1u << 6));
             }
             PanelState_Init(ctx);
+            Display_ApplyPanelType(g_panel_cfg.panel_type);
             need_save = 1u;
         }
         break;
@@ -479,7 +495,7 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
         return;
     }
 
-    is_small = (PanelCfg_Get()->panel_type == PANEL_TYPE_SMALL) ? 1u : 0u;
+    is_small = PANEL_TYPE_IS_SMALL(PanelCfg_Get()->panel_type) ? 1u : 0u;
 
     /* TouchGFX сам переходит logo→main. Синхронизируем только LOGO→MAIN:
      * если затирать MENU_* (окно UI_NAV меню → ещё не сработал GotoScreen),
@@ -579,23 +595,24 @@ void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp)
     ctx->pending_btn_count = 0u;
     ctx->pending_ui_count = 0u;
 
-    /* Абсолютный level пусковых кнопок в каждом POLL: если RELEASE потерялся
-     * на шине, следующий успешный POLL всё равно снимет удержание на ППКУ. */
+    /* Абсолютный level пусковых кнопок в каждом POLL — живой Button_GetState.
+     * Не перезаписываем уже лежащий в pending edge (Press): иначе POLL до
+     * следующего Button_Process может обнулить только что зафиксированное нажатие. */
     for (bi = 0u; bi < (uint8_t)(sizeof(level_btns) / sizeof(level_btns[0])); bi++) {
         uint8_t btn = level_btns[bi];
         uint8_t type;
+        uint8_t state;
         uint8_t level;
         uint8_t already = 0u;
         uint8_t ei;
 
-        if (PanelCfg_Get()->panel_type == PANEL_TYPE_SMALL && btn == BUT_FORCE) {
+        if (PANEL_TYPE_IS_SMALL(PanelCfg_Get()->panel_type) && btn == BUT_FORCE) {
             continue;
         }
         type = panel_state_btn_type(btn);
         if (type == 0u) {
             continue;
         }
-        level = ctx->btn_prev_level[btn];
         for (ei = 0u; ei < rsp->evt_count && ei < RS_PANEL_MAX_POLL_BTN_EVENTS; ei++) {
             if (rsp->btn_events[ei].type == type) {
                 already = 1u;
@@ -605,11 +622,15 @@ void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp)
         if (already != 0u) {
             continue;
         }
+        state = (uint8_t)Button_GetState(btn);
+        level = (state == (uint8_t)ButtonStateReset || state == (uint8_t)ButtonStateError) ? 0u : 1u;
+        ctx->btn_prev_state[btn] = state;
+        ctx->btn_prev_level[btn] = level;
         if (rsp->evt_count >= RS_PANEL_MAX_POLL_BTN_EVENTS) {
             break;
         }
         rsp->btn_events[rsp->evt_count].type = type;
-        rsp->btn_events[rsp->evt_count].state = ctx->btn_prev_state[btn];
+        rsp->btn_events[rsp->evt_count].state = state;
         rsp->btn_events[rsp->evt_count].level = level;
         rsp->evt_count++;
     }

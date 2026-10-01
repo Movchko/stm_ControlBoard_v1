@@ -42,7 +42,9 @@ public:
      * nZoneNames / zoneNames - список имён активных зон (ротация и пауза 3 с — в mainscreenView)
      */
     void setFireStatusFromApp(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-			      char (*zoneNames)[ZONE_NAME_SIZE + 1]);
+			      char (*zoneNames)[ZONE_NAME_SIZE + 1],
+			      const uint8_t *zoneModes,
+			      const uint8_t *zoneRemaining);
 
     /* Обновление предупреждений (неисправностей) для главного экрана. */
     void setWarningStatusFromApp(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
@@ -58,6 +60,8 @@ public:
     uint8_t getFireRemaining() const { return fireRemaining; }
     uint8_t getFireZoneNameCount() const { return fireZoneNameCount; }
     char (*getFireZoneNames())[ZONE_NAME_SIZE + 1] { return fireZoneNames; }
+    uint8_t *getFireZoneModes() { return fireZoneModes; }
+    uint8_t *getFireZoneRemaining() { return fireZoneRemaining; }
 #endif
 
 protected:
@@ -74,6 +78,8 @@ protected:
     uint8_t fireRemaining = 0;
     uint8_t fireZoneNameCount = 0;
     char fireZoneNames[16][ZONE_NAME_SIZE + 1];
+    uint8_t fireZoneModes[16] = {};
+    uint8_t fireZoneRemaining[16] = {};
 
     bool warningActive = false;
     uint8_t warningCount = 0;

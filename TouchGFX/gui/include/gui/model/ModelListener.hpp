@@ -23,7 +23,9 @@ public:
 
     /** Обновление состояния пожара: вызывается из модели по запросу приложения ППКУ. */
     virtual void onFireStatusChanged(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-				     char (*zoneNames)[ZONE_NAME_SIZE + 1]) {}
+				     char (*zoneNames)[ZONE_NAME_SIZE + 1],
+				     const uint8_t *zoneModes,
+				     const uint8_t *zoneRemaining) {}
     virtual void onWarningStatusChanged(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
 					char (*details)[ZONE_NAME_SIZE + 1]) {}
     /** Звук Вкл/Выкл изменился (не каждый tick — только при реальной смене). */

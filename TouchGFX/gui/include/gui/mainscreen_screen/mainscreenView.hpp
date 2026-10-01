@@ -29,7 +29,9 @@ public:
 #ifndef SIMULATOR
     /** Таймер + имена зон по очереди (одно имя, ротация 3 с после полного показа). */
     void updateFireStatus(bool active, uint8_t mode, uint8_t zone, uint8_t remaining_s, uint8_t nZoneNames,
-			  char (*zoneNames)[ZONE_NAME_SIZE + 1]);
+			  char (*zoneNames)[ZONE_NAME_SIZE + 1],
+			  const uint8_t *zoneModes,
+			  const uint8_t *zoneRemaining);
     void updateWarningStatus(bool active, uint8_t nItems, char (*bigTitles)[WARNING_TITLE_LEN],
 			     char (*details)[ZONE_NAME_SIZE + 1]);
 
