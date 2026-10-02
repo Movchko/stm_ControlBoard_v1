@@ -88,6 +88,11 @@ void Beeper_FireAlarmOff(void);
  */
 void Beeper_ContinuousOff(void);
 void Beeper_StopPattern(void);
+/**
+ * @brief Полный стоп (паттерн/тревога/one-shot) + сброс resume после BTN_ACK.
+ * Нужен для SOUND_OFF при отпускании ПУСК ОБЩИЙ.
+ */
+void Beeper_AllOff(void);
 
 /**
  * @brief Переключить состояние постоянного пищания

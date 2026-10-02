@@ -101,11 +101,24 @@ static void Led_SyncToI2C(void)
 
 	/* 2) Состояния (регистры по 4 LED) */
 	for (uint8_t group = 0u; group < 4u; group++) {
-		uint8_t cur_val = Led_PackGroupState(cur_led_state, group);
-		uint8_t hw_val  = Led_PackGroupState(hw_led_state, group);
-		if (cur_val != hw_val) {
+		uint8_t base = (uint8_t)(group * 4u);
+		uint8_t dirty = 0u;
+		uint8_t cur_val;
+		uint8_t hw_val;
+		/* 0xFF в hw-кэше — «форс sync» после смены фазы BLINK.
+		 * Pack(0xFF&3→3→1) совпадает с фазой blink_on=1 → cur==hw и
+		 * I2C-запись пропускалась: LED_FIRE (MODE_BLINK/ПОЖАР2) оставался OFF. */
+		for (uint8_t i = 0u; i < 4u; i++) {
+			uint8_t idx = (uint8_t)(base + i);
+			if (idx < NUM_LED && hw_led_state[idx] == 0xFFu) {
+				dirty = 1u;
+				break;
+			}
+		}
+		cur_val = Led_PackGroupState(cur_led_state, group);
+		hw_val = Led_PackGroupState(hw_led_state, group);
+		if (dirty != 0u || cur_val != hw_val) {
 			HAL_I2C_Mem_Write(&hi2c2, 0xC0, (uint16_t)(0x14u + group), I2C_MEMADD_SIZE_8BIT, &cur_val, sizeof(cur_val), 20);
-			uint8_t base = (uint8_t)(group * 4u);
 			for (uint8_t i = 0u; i < 4u; i++) {
 				uint8_t idx = (uint8_t)(base + i);
 				if (idx < NUM_LED) {

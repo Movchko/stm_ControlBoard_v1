@@ -12,6 +12,7 @@
 #include "device_config.h"
 #include "event_log.h"
 #include "sound_profiles.h"
+#include "fire.h"
 
 extern DAC_HandleTypeDef hdac1;
 extern TIM_HandleTypeDef htim6;
@@ -537,11 +538,26 @@ void Beeper_ContinuousOff(void)
 
 void Beeper_StopPattern(void)
 {
+	/* Сбрасываем resume всегда: SOUND_OFF мог прийти во время BTN_ACK (LONG_BEEP),
+	 * когда state != PATTERN — иначе после клика снова стартует START_ALL_HOLD. */
+	g_resume_ctx.valid = 0u;
 	if (beeper_state == BEEPER_STATE_PATTERN) {
 		beeper_state = BEEPER_STATE_IDLE;
-		g_resume_ctx.valid = 0u;
 		Beeper_Off();
 	}
+}
+
+/**
+ * @brief Полный стоп звука (паттерн / тревога / one-shot) и запрет resume после ACK.
+ */
+void Beeper_AllOff(void)
+{
+	g_resume_ctx.valid = 0u;
+	beeper_state = BEEPER_STATE_IDLE;
+	pattern_repeat_ticks = 0u;
+	pattern_pulses_left = 0u;
+	pattern_pulses_total = 0u;
+	Beeper_Off();
 }
 
 /**
@@ -615,6 +631,14 @@ void Beeper_ButtonAcknowledge(void)
 	s_ack_cooldown_ticks = BEEPER_ACK_COOLDOWN_TICKS;
 	if (!Beeper_IsOneShotState(beeper_state)) {
 		Beeper_CaptureResumeStateIfNeeded();
+	}
+	/* ПУСК ОБЩИЙ уже отпущен — не возвращать hold-паттерн после клика мелкой кнопки. */
+	if (Fire_IsStartAllHoldActive() == 0u &&
+	    g_resume_ctx.valid != 0u &&
+	    g_resume_ctx.state == BEEPER_STATE_PATTERN &&
+	    g_resume_ctx.repeat_ticks == Beeper_MsToTicks(SOUND_START_ALL_HOLD_PERIOD_MS) &&
+	    g_resume_ctx.pulses_total == 1u) {
+		g_resume_ctx.valid = 0u;
 	}
 	beep_sound = 1u;
 	beeper_state = BEEPER_STATE_LONG_BEEP;

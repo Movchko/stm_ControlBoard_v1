@@ -474,7 +474,7 @@ static void rs_apply_leds(const RsPanelLedCmd *cmd)
         case RS_PANEL_LED_MODE_BRIGHT:
             Led_Set(led, 1u);
             Led_SetBrightness(led, cmd->items[i].value);
-            if (led == LED_START) {
+            if (led == LED_START || led == LED_FIRE) {
                 Led_ForceStatusBright(led);
             }
             break;
@@ -519,8 +519,7 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
     PPKYConfig.beep = (cmd->mute == 0u) ? 1u : 0u;
     Beeper_SoundOnOff(cmd->mute == 0u);
     if (cmd->mute != 0u) {
-        Beeper_StopPattern();
-        Beeper_FireAlarmOff();
+        Beeper_AllOff();
         s_last_sound_cmd = *cmd;
         s_last_sound_valid = 1u;
         return;
@@ -528,9 +527,8 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
 
     switch (cmd->profile) {
     case RS_PANEL_SOUND_OFF:
-        Beeper_StopPattern();
-        Beeper_FireAlarmOff();
-        Beeper_ContinuousOff();
+        /* Полный стоп: иначе при OFF во время BTN_ACK resume вернёт START_ALL_HOLD. */
+        Beeper_AllOff();
         break;
     case RS_PANEL_SOUND_FAULT:
         Beeper_StartPulseTrain(BEEPER_PATTERN_FAULT_ON_MS,
@@ -619,6 +617,12 @@ static void rs_sync_status_leds(uint8_t warn_active, uint8_t warn_has_fault, uin
         Led_Set(LED_FIRE, 0u);
         Led_Set(LED_START, 0u);
         Led_Set(LED_STOP, 0u);
+    } else {
+        /* Пожар на UI есть, а CMD_LED мог потеряться (SOUND/POLL busy):
+         * зажечь ПОЖАР по MAIN_FIRE. Дальше CMD_LED выставит BLINK/BRIGHT. */
+        Led_Set(LED_FIRE, 1u);
+        Led_SetBrightness(LED_FIRE, LED_STATUS_MAX_BRIGHTNESS);
+        Led_ForceStatusBright(LED_FIRE);
     }
 
     if (warn_has_fault != 0u) {
@@ -709,10 +713,23 @@ static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload,
     n_zones = parsed;
 
     /* Hold ПУСК ОБЩИЙ из IDLE: MAIN_FIRE active=1 (таймер), но FSM на хосте IDLE —
-     * CMD_LED держит NORM=ON. Не гасить NORM по active=1, иначе NORM мигает. */
-    s_fire_hold_idle = (active != 0u && mode == 1u && n_zones == 0u) ? 1u : 0u;
-    rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault,
-                        (s_fire_hold_idle != 0u) ? 0u : active);
+     * CMD_LED держит NORM/ERR. Не трогать статусные LED из hold-кадра: иначе
+     * гаснет НОРМА / вспыхивает неисправность при частых MAIN_FIRE. */
+    {
+        uint8_t prev_hold = s_fire_hold_idle;
+        s_fire_hold_idle = (active != 0u && mode == 1u && n_zones == 0u) ? 1u : 0u;
+        if (s_fire_hold_idle == 0u) {
+            rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault, active);
+        }
+        /* Отпускание hold: вернуть дежурную подсветку ПУСК ОБЩИЙ, если CMD_LED потерялся
+         * в фазе blink_off. */
+        if (prev_hold != 0u && s_fire_hold_idle == 0u && active == 0u) {
+            Led_Set(LED_BUT_START_ALL, 0u);
+            Led_Set(LED_STR_START_ALL, 1u);
+            Led_SetBrightness(LED_BUT_START_ALL, LED_BUT_DIM_BRIGHTNESS);
+            Led_SetBrightness(LED_STR_START_ALL, LED_BUT_DIM_BRIGHTNESS);
+        }
+    }
     rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names, zone_modes, zone_remaining);
 }
 
