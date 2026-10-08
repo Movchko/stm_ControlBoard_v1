@@ -7,6 +7,7 @@
 #include "event_log_reader.h"
 #include "event_log_ui.h"
 #include "event_logger.h"
+#include "panel_journal_cache.h"
 #endif
 
 ScreenMenu_jurnalView::ScreenMenu_jurnalView()
@@ -108,20 +109,16 @@ void ScreenMenu_jurnalView::refreshJournalUi()
     EventLogTierInfo_t info;
     if (EventLogReader_GetTierInfo(EVENT_LOG_UI_TIER, &info) && info.count > 0u) {
         recordCount = info.count;
-        /* Стартуем с новейшей (logical = count-1). */
-        uint32_t start = recordCount - 1u;
+        /* Показать выбранную на ППКУ (окно в кэше); иначе новейшую, если есть в окне. */
+        uint32_t start = PanelJournalCache_GetSelected();
+        if (start >= recordCount) {
+            start = recordCount - 1u;
+        }
         if (!loadLogical(start)) {
-            /* Ищем ближайшую валидную назад. */
             logicalIndex = start;
             hasValid = 0u;
-            for (uint32_t i = 0u; i < recordCount && i < 64u; i++) {
-                uint32_t idx = start - i;
-                if (loadLogical(idx)) {
-                    break;
-                }
-                if (idx == 0u) {
-                    break;
-                }
+            if (loadLogical(recordCount - 1u)) {
+                /* ok */
             }
         }
     }
@@ -131,37 +128,14 @@ void ScreenMenu_jurnalView::refreshJournalUi()
 
 void ScreenMenu_jurnalView::nextRecord()
 {
-    if (stepValid(+1)) {
-        renderCurrent();
-    }
+    /* v3: листание через JOURNAL_GET (Drain), не локальный кэш. */
 }
 
 void ScreenMenu_jurnalView::prevRecord()
 {
-    if (stepValid(-1)) {
-        renderCurrent();
-    }
 }
 
 void ScreenMenu_jurnalView::jumpToNewest()
 {
-    if (recordCount == 0u) {
-        return;
-    }
-    uint32_t start = recordCount - 1u;
-    if (loadLogical(start)) {
-        renderCurrent();
-        return;
-    }
-    for (uint32_t i = 1u; i < recordCount && i < 64u; i++) {
-        uint32_t idx = start - i;
-        if (loadLogical(idx)) {
-            renderCurrent();
-            return;
-        }
-        if (idx == 0u) {
-            break;
-        }
-    }
 }
 #endif

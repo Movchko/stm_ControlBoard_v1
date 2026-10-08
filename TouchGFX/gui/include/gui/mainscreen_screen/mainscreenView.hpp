@@ -50,6 +50,8 @@ public:
     void uiSetTopHeaderText(const char* text);
     /** Дежурный режим: по центру большого поля — «НОРМА». */
     void uiShowNormalStatus();
+    /** SYS_READY: снять «ПРОВЕРКА» и показать НОРМА/баннер по приоритету. */
+    void uiOnSysReady(void);
     /** Удержание ПУСК ОБЩИЙ: таймер 3с по центру (важнее «НОРМА»). */
     void uiShowStartAllHoldTimer(const char* center_text);
     /** Оверлей конфигурации по центру главного экрана. */

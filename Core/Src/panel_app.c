@@ -39,9 +39,9 @@ void PanelApp_Init(void) {
 	PanelApp_WireTouchGfx();
 	PanelApp_Rs485Init();
 
-	Led_Set(LED_POWER, 1u);
-
-	Led_Set(LED_NORM, 1u);
+	/* ПИТАНИЕ/НОРМА не зажигаем сами — только по снимку с ППКУ. */
+	Led_Set(LED_POWER, 0u);
+	Led_Set(LED_NORM, 0u);
 
 }
 

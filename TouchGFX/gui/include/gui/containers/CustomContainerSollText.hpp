@@ -26,6 +26,9 @@ public:
     /** true, если после setText текст не шире области — без прокрутки. */
     bool isMarqueeFitting() const { return marqueeFitsWidth; }
 
+    /** true, пока идёт пауза/прокрутка до колбэка finished (один проход). */
+    bool isMarqueeRunning() const { return marqueeRunning; }
+
     /**
      * Установить колбэк, который вызывается один раз
      * после полной прокрутки текущего текста.

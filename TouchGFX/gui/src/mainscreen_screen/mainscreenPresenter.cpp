@@ -9,6 +9,9 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
+#include "panel_ui_bridge.h"
+#include "rs_panel_protocol.h"
+#include "rs_panel_v3_slave.h"
 #include <cstdio>
 #endif
 
@@ -25,6 +28,9 @@ void mainscreenPresenter::activate()
     MenuUi_SetMenuSessionScreen(0u);
     MenuUi_ResetMenuIndex();
     /* Один раз при входе на экран — без последующего опроса в tick. */
+    if (RsPanelV3Slave_IsSysReady() != 0u) {
+        view.uiOnSysReady();
+    }
     if (model) {
         view.applyMuteIcon(model->getSoundOn());
         view.applyWifiIcon(EspManager_IsWifiIconVisible(HAL_GetTick()) != 0u);
@@ -69,6 +75,10 @@ void mainscreenPresenter::handleButton(uint8_t but, uint8_t state)
 
     if (but == BUT_ENTER)
     {
+        /* Панель владеет UI: ENTER на главном открывает меню локально (не ждём ППКУ). */
+        if (Fire_IsActive() == 0u) {
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_ROOT, RS_PANEL_UI_ACTION_REPLACE);
+        }
         return;
     }
 
@@ -101,6 +111,11 @@ void mainscreenPresenter::onWifiLinkChanged(bool active)
 	view.applyWifiIcon(active);
 }
 
+void mainscreenPresenter::onSysReadyChanged()
+{
+	view.uiOnSysReady();
+}
+
 void mainscreenPresenter::onAppTick()
 {
     static uint8_t was_overlay = 0u;
@@ -112,9 +127,16 @@ void mainscreenPresenter::onAppTick()
             was_overlay = 0u;
             last_sync_ms = 0u;
         }
+#ifndef SIMULATOR
+        /* SYS_READY мог прийти на logo (listener не mainscreen) — дожать здесь. */
+        if (RsPanelV3Slave_IsSysReady() != 0u) {
+            view.uiOnSysReady();
+        }
+#endif
         /* Страховка раз в 200 мс: если WARN уже в Model, а view после logo/setupScreen
          * остался на «НОРМА». Бегущая строка не сбрасывается (same_marquee в View). */
-        if (model && (model->getWarningActive() || model->getFireActive())) {
+        if (model && (model->getWarningActive() || model->getFireActive() ||
+                      RsPanelV3Slave_HasFaults() != 0u)) {
             const uint32_t now = HAL_GetTick();
             if (last_sync_ms == 0u || (now - last_sync_ms) >= 200u) {
                 last_sync_ms = now;

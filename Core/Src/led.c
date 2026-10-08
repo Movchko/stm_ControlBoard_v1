@@ -177,10 +177,17 @@ void Led_Init() {
 	  Led_SetBrightness(LED_BUT_ENTER_UP, LED_BUT_DIM_BRIGHTNESS);
 	  Led_SetBrightness(LED_BUT_ESC_DW,  LED_BUT_DIM_BRIGHTNESS);
 
-	  Led_Set(LED_POWER, LED_ON);
-	  Led_Set(LED_NORM,  LED_ON);
-  Led_SetBrightness(LED_POWER, LED_STATUS_MAX_BRIGHTNESS);
-  Led_SetBrightness(LED_NORM,  LED_STATUS_MAX_BRIGHTNESS);
+	  /* Надпись ПУСК ОБЩИЙ — дежурный режим (кнопка выкл.). */
+	  Led_Set(LED_STR_START_ALL, LED_ON);
+	  Led_Set(LED_BUT_START_ALL, LED_OFF);
+	  Led_SetBrightness(LED_STR_START_ALL, LED_BUT_DIM_BRIGHTNESS);
+	  Led_SetBrightness(LED_BUT_START_ALL, LED_BUT_DIM_BRIGHTNESS);
+
+	  /* POWER/NORM only from PPKU snapshot (rs_v3_sync_status_leds). */
+	  Led_Set(LED_POWER, LED_OFF);
+	  Led_Set(LED_NORM,  LED_OFF);
+	  Led_SetBrightness(LED_POWER, LED_STATUS_MAX_BRIGHTNESS);
+	  Led_SetBrightness(LED_NORM,  LED_STATUS_MAX_BRIGHTNESS);
 
   led_but_is_bright = 0;
   led_sync_tick = LED_I2C_SYNC_PERIOD_TICKS;

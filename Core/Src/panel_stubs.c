@@ -9,6 +9,7 @@
 #include "device_config.h"
 #include "panel_cfg.h"
 #include "panel_state.h"
+#include "rs_panel_v3_slave.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -80,9 +81,21 @@ void Fire_OnPauseExtinguishmentTimer(uint32_t msg_id) { (void)msg_id; }
 void Fire_OnResumeExtinguishmentTimer(uint32_t msg_id) { (void)msg_id; }
 void Fire_OnReplyPauseExtinguishmentTimer(uint32_t msg_id) { (void)msg_id; }
 void Fire_OnReplyResumeExtinguishmentTimer(uint32_t msg_id) { (void)msg_id; }
-uint8_t Fire_IsActive(void) { return s_fire_is_active; }
+uint8_t Fire_IsActive(void)
+{
+	if (RsPanelV3Slave_IsV3Active() != 0u) {
+		return RsPanelV3Slave_IsFireActive();
+	}
+	return s_fire_is_active;
+}
 uint8_t Fire_HasExtinguishIncomplete(void) { return 0u; }
-uint8_t Fire_IsStartAllHoldActive(void) { return s_start_all_hold_active; }
+uint8_t Fire_IsStartAllHoldActive(void)
+{
+	if (RsPanelV3Slave_IsV3Active() != 0u) {
+		return RsPanelV3Slave_IsHoldActive();
+	}
+	return s_start_all_hold_active;
+}
 uint8_t Fire_IsExtinguishIndicationActive(void) { return 0u; }
 uint8_t Fire_GetPanelFireLedMode(void) { return 0u; }
 void Fire_UiSetManualSelection(uint8_t enabled, uint8_t selected_ui_index)
@@ -356,7 +369,10 @@ typedef struct {
 } PanelJournalEntry_t;
 
 static PanelJournalEntry_t g_journal_entries[PANEL_JOURNAL_MAX_ITEMS];
-static uint32_t g_journal_count;
+static uint32_t g_journal_window_count; /* сколько записей в окне */
+static uint32_t g_journal_total;        /* всего на ППКУ */
+static uint32_t g_journal_selected;     /* logical index выбранной */
+static volatile uint8_t g_journal_dirty;
 
 void PanelDeviceCache_SetList(uint8_t selected_slot,
                               uint8_t count,
@@ -484,10 +500,10 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
     }
 }
 
-static void PanelJournalCache_Reset(void)
+static void PanelJournalCache_ResetWindow(void)
 {
 	memset(g_journal_entries, 0, sizeof(g_journal_entries));
-	g_journal_count = 0u;
+	g_journal_window_count = 0u;
 }
 
 uint32_t PanelJournalCache_GetCapacity(void)
@@ -497,7 +513,32 @@ uint32_t PanelJournalCache_GetCapacity(void)
 
 uint32_t PanelJournalCache_GetCount(void)
 {
-	return g_journal_count;
+	return g_journal_total;
+}
+
+uint32_t PanelJournalCache_GetSelected(void)
+{
+	return g_journal_selected;
+}
+
+uint8_t PanelJournalCache_TakeDirty(void)
+{
+	uint8_t d = g_journal_dirty;
+	g_journal_dirty = 0u;
+	return d;
+}
+
+void PanelJournalCache_SetTotal(uint32_t total)
+{
+	g_journal_total = total;
+	if (g_journal_selected >= g_journal_total && g_journal_total > 0u) {
+		g_journal_selected = g_journal_total - 1u;
+	}
+	if (g_journal_total == 0u) {
+		PanelJournalCache_ResetWindow();
+		g_journal_selected = 0u;
+	}
+	g_journal_dirty = 1u;
 }
 
 static uint16_t panel_rs_get_u16le(const uint8_t *src)
@@ -560,13 +601,18 @@ void PanelJournalCache_SetList(uint32_t total,
 	uint16_t pos = 0u;
 	uint8_t i;
 
-	(void)total;
-	(void)selected_idx;
 	(void)window_first;
 
-	PanelJournalCache_Reset();
+	g_journal_total = total;
+	g_journal_selected = selected_idx;
+	if (g_journal_total > 0u && g_journal_selected >= g_journal_total) {
+		g_journal_selected = g_journal_total - 1u;
+	}
 
-	if (items == 0 || items_len == 0u || n_items == 0u) {
+	PanelJournalCache_ResetWindow();
+
+	if (items == 0 || items_len == 0u || n_items == 0u || total == 0u) {
+		g_journal_dirty = 1u;
 		return;
 	}
 
@@ -599,7 +645,8 @@ void PanelJournalCache_SetList(uint32_t total,
 		}
 	}
 
-	g_journal_count = i;
+	g_journal_window_count = i;
+	g_journal_dirty = 1u;
 }
 
 /* JOURNAL_DETAIL:
@@ -615,7 +662,8 @@ void PanelJournalCache_SetDetail(uint32_t rec_idx,
 	PanelJournalEntry_t *found = 0;
 
 	if (text == 0 || text_len == 0u) {
-		PanelJournalCache_Reset();
+		PanelJournalCache_ResetWindow();
+		g_journal_dirty = 1u;
 		return;
 	}
 
@@ -623,7 +671,7 @@ void PanelJournalCache_SetDetail(uint32_t rec_idx,
 		text_len = EVENT_LOG_UI_DETAIL_LEN;
 	}
 
-	for (i = 0u; i < g_journal_count; i++) {
+	for (i = 0u; i < g_journal_window_count; i++) {
 		if (g_journal_entries[i].rec_idx == rec_idx) {
 			found = &g_journal_entries[i];
 			break;
@@ -631,12 +679,16 @@ void PanelJournalCache_SetDetail(uint32_t rec_idx,
 	}
 
 	if (found == 0) {
-		PanelJournalCache_Reset();
+		PanelJournalCache_ResetWindow();
 		found = &g_journal_entries[0];
-		g_journal_count = 1u;
+		g_journal_window_count = 1u;
 		found->rec_idx = rec_idx;
 	}
 
+	g_journal_selected = rec_idx;
+	if (g_journal_total < 1u) {
+		g_journal_total = 1u;
+	}
 	found->ts = ts;
 	found->code = code;
 
@@ -650,31 +702,56 @@ void PanelJournalCache_SetDetail(uint32_t rec_idx,
 		memcpy(found->title, text, sl);
 		found->title[sl] = '\0';
 	}
+	g_journal_dirty = 1u;
 }
 
-static bool PanelJournalCache_ReadEntry(uint32_t logical_index, PanelJournalEntry_t *out)
+static bool PanelJournalCache_ReadEntryByWindow(uint32_t window_index, PanelJournalEntry_t *out)
 {
 	if (out == 0) {
 		return false;
 	}
-	if (logical_index >= g_journal_count) {
+	if (window_index >= g_journal_window_count) {
 		return false;
 	}
-	*out = g_journal_entries[logical_index];
+	*out = g_journal_entries[window_index];
 	return true;
+}
+
+static bool PanelJournalCache_FindWindowIndex(uint32_t logical_index, uint32_t *window_index_out)
+{
+	uint32_t i;
+	if (window_index_out == 0) {
+		return false;
+	}
+	for (i = 0u; i < g_journal_window_count; i++) {
+		if (g_journal_entries[i].rec_idx == logical_index) {
+			*window_index_out = i;
+			return true;
+		}
+	}
+	/* Окно из 1 записи при selected — частый v3-случай. */
+	if (g_journal_window_count == 1u && logical_index == g_journal_selected) {
+		*window_index_out = 0u;
+		return true;
+	}
+	return false;
 }
 
 bool PanelJournalCache_ReadRecord(uint32_t logical_index, EventLogRecord_t *out_record)
 {
 	PanelJournalEntry_t e;
-	if (!PanelJournalCache_ReadEntry(logical_index, &e) || out_record == 0) {
+	uint32_t win = 0u;
+	if (out_record == 0 || !PanelJournalCache_FindWindowIndex(logical_index, &win)) {
+		return false;
+	}
+	if (!PanelJournalCache_ReadEntryByWindow(win, &e)) {
 		return false;
 	}
 
 	memset(out_record, 0, sizeof(*out_record));
 	out_record->event_code = e.code;
-	/* additional[0] используем как индекс записи для EventLogUi_FormatRecord(). */
-	out_record->additional[0] = (uint8_t)logical_index;
+	/* additional[0] — индекс в окне кэша для EventLogUi_FormatRecord(). */
+	out_record->additional[0] = (uint8_t)win;
 	return true;
 }
 
@@ -695,7 +772,7 @@ void EventLogUi_FormatRecord(const EventLogRecord_t *rec,
 			     EventLogUiLines_t *out)
 {
 	PanelJournalEntry_t e;
-	uint32_t logical_index;
+	uint32_t window_index;
 
 	(void)display_index_1based;
 	(void)count;
@@ -704,8 +781,8 @@ void EventLogUi_FormatRecord(const EventLogRecord_t *rec,
 		return;
 	}
 
-	logical_index = (uint32_t)rec->additional[0];
-	if (!PanelJournalCache_ReadEntry(logical_index, &e)) {
+	window_index = (uint32_t)rec->additional[0];
+	if (!PanelJournalCache_ReadEntryByWindow(window_index, &e)) {
 		EventLogUi_FormatEmpty(out);
 		return;
 	}

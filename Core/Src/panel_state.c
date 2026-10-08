@@ -7,6 +7,7 @@
 #include "panel_app.h"
 #include "panel_cfg.h"
 #include "rs_panel_debug.h"
+#include "rs_panel_v3_slave.h"
 #include "upd.h"
 
 static void panel_state_fill_caps(PanelStateContext *ctx);
@@ -547,8 +548,12 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
             uint8_t route_connection_ui = panel_state_is_remote_connection_button(screen, btn);
             if (state == (uint8_t)ButtonStatePress) {
                 const uint8_t on_main_screen = (MenuUi_IsMainScreenActive() != 0u);
+                const uint8_t fire_blocks_menu =
+                    (ctx->fire_active != 0u) ||
+                    (RsPanelV3Slave_IsV3Active() != 0u &&
+                     RsPanelV3Slave_IsFireActive() != 0u);
                 const uint8_t is_main_enter =
-                    (on_main_screen != 0u && btn == BUT_ENTER && ctx->fire_active == 0u);
+                    (on_main_screen != 0u && btn == BUT_ENTER && fire_blocks_menu == 0u);
                 const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(screen, btn);
 
                 if (is_main_enter != 0u) {

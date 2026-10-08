@@ -32,6 +32,8 @@ public:
     virtual void onSoundOnChanged(bool soundOn) {}
     /** WiFi: активное подключение хоста по TCP. */
     virtual void onWifiLinkChanged(bool active) {}
+    /** SYS_READY с ППКУ: снять «ПРОВЕРКА». */
+    virtual void onSysReadyChanged() {}
     virtual void onAppTick() {}
 #endif
 protected:

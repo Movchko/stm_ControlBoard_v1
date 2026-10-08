@@ -27,6 +27,13 @@ typedef struct {
 void RsPanelEndpoint_Init(void);
 void RsPanelEndpoint_Timer10ms(void);
 void RsPanelEndpoint_ProcessDeferredUi(void);
+/** Очередь WARN UI (из UART/OnPoll) → TouchGFX tick. */
+void RsPanelEndpoint_QueueWarningUi(uint8_t active,
+                                    uint8_t n_items,
+                                    char (*titles)[24],
+                                    char (*details)[ZONE_NAME_SIZE + 1]);
+/** Очередь SYS_READY 0→1 → снять «ПРОВЕРКА» в TouchGFX tick (после WARN). */
+void RsPanelEndpoint_QueueSysReadyNotify(void);
 
 #ifdef __cplusplus
 }

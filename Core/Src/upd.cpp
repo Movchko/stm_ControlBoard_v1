@@ -47,6 +47,9 @@ void PanelUpd_Timer10ms(void)
 
 void App_WriteProgramWatchdog(void)
 {
+	//TODO delete return
+	return;
+
 	uint32_t *val = (uint32_t *)PANEL_APP_WD_ADDR;
 	uint32_t quad_word[4];
 

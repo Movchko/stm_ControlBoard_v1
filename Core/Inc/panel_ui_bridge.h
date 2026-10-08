@@ -21,6 +21,8 @@ void PanelUiBridge_SetWarningStatus(uint8_t active,
                                     char (*titles)[24],
                                     char (*details)[ZONE_NAME_SIZE + 1]);
 void PanelUiBridge_StartIndicationTest(void);
+/** SYS_READY 0→1: снять «ПРОВЕРКА» (вызывать из TouchGFX tick / ProcessDeferredUi). */
+void PanelUiBridge_NotifySysReady(void);
 
 #ifdef __cplusplus
 }

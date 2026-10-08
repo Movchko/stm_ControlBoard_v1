@@ -1,4 +1,5 @@
 #include "rs_panel_endpoint.h"
+#include "rs_panel_v3_slave.h"
 
 #include <string.h>
 
@@ -10,6 +11,7 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "panel_cfg.h"
+#include "panel_journal_cache.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
 #include "rs_panel_debug.h"
@@ -21,18 +23,7 @@ extern PPKYCfg PPKYConfig;
 extern UART_HandleTypeDef huart4;
 extern RTC_HandleTypeDef hrtc;
 
-/* Journal cache lives in panel_stubs.c (реализация для UI журнала на панели). */
-extern void PanelJournalCache_SetList(uint32_t total,
-				       uint32_t selected_idx,
-				       uint32_t window_first,
-				       uint8_t n_items,
-				       const uint8_t *items,
-				       uint16_t items_len);
-extern void PanelJournalCache_SetDetail(uint32_t rec_idx,
-					  uint32_t ts,
-					  uint16_t code,
-					  const uint8_t *text,
-					  uint16_t text_len);
+/* Device/zone caches — в panel_stubs.c. */
 extern void PanelDeviceCache_SetList(uint8_t selected_slot,
                                      uint8_t count,
                                      const uint8_t *items,
@@ -67,17 +58,21 @@ typedef struct {
     uint8_t zone_remaining[16];
 } DeferredFireUi;
 
+/* До 16 — как Model / v3 FAULT push (старый v2 лимит PANEL_STATE_MAX_WARN_ITEMS=4). */
+#define RS_DEFERRED_WARN_MAX 16u
+
 typedef struct {
     uint8_t active;
     uint8_t n_items;
-    char titles[PANEL_STATE_MAX_WARN_ITEMS][24];
-    char details[PANEL_STATE_MAX_WARN_ITEMS][ZONE_NAME_SIZE + 1];
+    char titles[RS_DEFERRED_WARN_MAX][24];
+    char details[RS_DEFERRED_WARN_MAX][ZONE_NAME_SIZE + 1];
 } DeferredWarnUi;
 
 static DeferredFireUi s_deferred_fire;
 static DeferredWarnUi s_deferred_warn;
 static volatile uint8_t s_fire_pending;
 static volatile uint8_t s_warn_pending;
+static volatile uint8_t s_sys_ready_pending;
 static uint8_t s_warn_ui_active = 0u;
 static uint8_t s_warn_ui_has_fault = 0u;
 /* MAIN_FIRE hold ПУСК ОБЩИЙ (mode=1, n_zones=0): не гасить NORM по fire_active. */
@@ -151,8 +146,8 @@ static void rs_queue_warn_ui(uint8_t active,
 {
     uint8_t i;
 
-    if (n_items > PANEL_STATE_MAX_WARN_ITEMS) {
-        n_items = PANEL_STATE_MAX_WARN_ITEMS;
+    if (n_items > RS_DEFERRED_WARN_MAX) {
+        n_items = (uint8_t)RS_DEFERRED_WARN_MAX;
     }
     s_deferred_warn.active = active;
     s_deferred_warn.n_items = n_items;
@@ -168,12 +163,26 @@ static void rs_queue_warn_ui(uint8_t active,
     g_rs_panel_dbg.ui_warn_pending = 1u;
 }
 
+void RsPanelEndpoint_QueueWarningUi(uint8_t active,
+                                    uint8_t n_items,
+                                    char (*titles)[24],
+                                    char (*details)[ZONE_NAME_SIZE + 1])
+{
+    rs_queue_warn_ui(active, n_items, titles, details);
+}
+
+void RsPanelEndpoint_QueueSysReadyNotify(void)
+{
+    s_sys_ready_pending = 1u;
+}
+
 void RsPanelEndpoint_ProcessDeferredUi(void)
 {
     if (s_nav_pending != 0u) {
         s_nav_pending = 0u;
         PanelUiBridge_GotoScreen(s_deferred_nav.screen_id, s_deferred_nav.action);
     }
+    /* WARN до SYS_READY: к моменту снятия «ПРОВЕРКА» списки уже в Model/view. */
     if (s_warn_pending != 0u) {
         s_warn_pending = 0u;
         g_rs_panel_dbg.ui_warn_pending = 0u;
@@ -181,6 +190,10 @@ void RsPanelEndpoint_ProcessDeferredUi(void)
                                        s_deferred_warn.n_items,
                                        s_deferred_warn.titles,
                                        s_deferred_warn.details);
+    }
+    if (s_sys_ready_pending != 0u) {
+        s_sys_ready_pending = 0u;
+        PanelUiBridge_NotifySysReady();
     }
     if (s_fire_pending != 0u) {
         s_fire_pending = 0u;
@@ -446,6 +459,9 @@ static uint8_t rs_led_type_to_local(uint8_t type)
 
 static void rs_apply_leds(const RsPanelLedCmd *cmd)
 {
+    if (RsPanelV3Slave_IsV3Active() != 0u) {
+        return;
+    }
     uint8_t i;
 
     if (cmd == 0) {
@@ -504,6 +520,9 @@ static uint8_t rs_sound_cmd_same(const RsPanelSoundCmd *a, const RsPanelSoundCmd
 
 static void rs_apply_sound(const RsPanelSoundCmd *cmd)
 {
+    if (RsPanelV3Slave_IsV3Active() != 0u) {
+        return;
+    }
     if (cmd == 0) {
         return;
     }
@@ -1242,10 +1261,27 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         break;
     case RS_PANEL_CMD_POLL:
         {
-            RsPanelPollReq req;
-            if (rs_decode_poll_req(frame->payload, frame->payload_len, &req)) {
-                (void)req;
-                rs_send_poll_rsp(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++);
+            /* v3 payload: ver=0x03 … ; иначе legacy PollReq. */
+            if (frame->payload_len > 0u && frame->payload != 0 &&
+                frame->payload[0] == RS_PANEL_V3_VERSION) {
+                if (RsPanelV3Slave_OnPoll(frame->payload, frame->payload_len) != 0u) {
+                    uint8_t payload[96];
+                    uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+                    if (plen > 0u) {
+                        /* OnTxFrame внутри rs_bus_send_frame увеличит poll_rsp_tx. */
+                        RsPanelDebug_OnPollRsp(0u, 0u);
+                        rs_bus_send_frame(endpoint, endpoint->panel_addr,
+                                          endpoint->next_tx_seq++,
+                                          RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
+                                          payload, plen);
+                    }
+                }
+            } else {
+                RsPanelPollReq req;
+                if (rs_decode_poll_req(frame->payload, frame->payload_len, &req)) {
+                    (void)req;
+                    rs_send_poll_rsp(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++);
+                }
             }
         }
         break;
@@ -1344,6 +1380,7 @@ void RsPanelEndpoint_Init(void)
     uint8_t addr;
 
     memset(&g_endpoint, 0, sizeof(g_endpoint));
+    RsPanelV3Slave_Init();
     RsPanelDebug_Reset();
     addr = PanelCfg_Init();
     g_endpoint.panel_addr = addr;
@@ -1370,6 +1407,8 @@ void RsPanelEndpoint_Timer10ms(void)
         }
     }
     PanelState_SampleButtons(&g_endpoint.state);
+    RsPanelV3Slave_DrainPanelState(&g_endpoint.state);
+    RsPanelV3Slave_Timer10ms();
     if (PanelState_TakeCapsResyncPending(&g_endpoint.state) != 0u) {
         rs_send_caps(&g_endpoint, g_endpoint.panel_addr, g_endpoint.next_tx_seq++);
     }

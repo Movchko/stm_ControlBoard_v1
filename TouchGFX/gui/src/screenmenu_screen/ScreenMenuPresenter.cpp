@@ -4,6 +4,12 @@
 #include "gost_mode.h"
 #include "menu_ui.h"
 #include "rs_panel_protocol.h"
+#include "panel_ui_bridge.h"
+#include "rs_panel_v3_slave.h"
+#include "device_config.h"
+#include "event_log.h"
+
+extern PPKYCfg PPKYConfig;
 
 ScreenMenuPresenter::ScreenMenuPresenter(ScreenMenuView& v)
     : view(v)
@@ -32,7 +38,8 @@ void ScreenMenuPresenter::activate()
 void ScreenMenuPresenter::deactivate()
 {
 #ifndef SIMULATOR
-    MenuUi_SetMenuSessionScreen(0u);
+    /* session не сбрасываем: переход в подменю уже выставил новый screen_id;
+     * сброс на MAIN делает PanelUiBridge / mainscreenPresenter::activate. */
 #endif
 }
 
@@ -65,9 +72,81 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
         return;
     }
 
-    /* UP/DOWN/ESC/ENTER в меню не обрабатываем локально: panel_state шлёт
-     * событие на ППКУ 2, мастер отвечает UI_NAV / MENU_LIST. */
-    (void)but;
+    /* Локальная навигация UI. События на ППКУ (при v3) — через panel_state/Drain. */
+    if (but == BUT_ESC) {
+        PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
+        return;
+    }
+
+    if (but == BUT_UP) {
+        currentIndex = (int16_t)((currentIndex - 1 + MENU_ITEMS) % MENU_ITEMS);
+        MenuUi_SetMenuSelected((uint16_t)currentIndex);
+        view.setMenuIndex(currentIndex);
+        refreshLine();
+        return;
+    }
+
+    if (but == BUT_DOWN) {
+        currentIndex = (int16_t)((currentIndex + 1) % MENU_ITEMS);
+        MenuUi_SetMenuSelected((uint16_t)currentIndex);
+        view.setMenuIndex(currentIndex);
+        refreshLine();
+        return;
+    }
+
+    if (but == BUT_ENTER) {
+        const int action = menuActionIndex(currentIndex);
+        if (action == 0) {
+            uint8_t mode = (uint8_t)((MenuUi_GetFireModeValue() + 1u) % 3u);
+            MenuUi_SetFireModeValue(mode);
+            PPKYConfig.fire_mode = mode;
+            EventLog_LogFireModeChange(mode, 0u);
+            refreshLine();
+            return;
+        }
+        if (action == 1) {
+            if (MenuUi_IsSoundBlocked() != 0u) {
+                refreshLine();
+                return;
+            }
+            soundOn = !soundOn;
+            PPKYConfig.beep = soundOn ? 1u : 0u;
+            MenuUi_SetSoundValue(soundOn ? 1u : 0u, MenuUi_IsSoundBlocked());
+            EventLog_LogSoundToggle(soundOn ? 1u : 0u, 0u);
+            /* SOUND_SET на хост: panel_state → Drain при MENU_SOUND; здесь только UI.
+             * На корневом меню v3 SOUND_SET шлём явно (нет отдельного экрана SOUND). */
+            if (RsPanelV3Slave_IsV3Active() != 0u) {
+                (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_SOUND_SET, 0u,
+                                               soundOn ? 1u : 0u, 0u, 0u);
+            }
+            if (model) {
+                model->setSoundOn(soundOn);
+                model->notifySoundToggled(soundOn);
+            }
+            refreshLine();
+            return;
+        }
+        if (action == 2) {
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_CONNECTION, RS_PANEL_UI_ACTION_REPLACE);
+            return;
+        }
+        if (action == 3) {
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_JOURNAL, RS_PANEL_UI_ACTION_REPLACE);
+            return;
+        }
+        if (action == 4) {
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_DEVICES, RS_PANEL_UI_ACTION_REPLACE);
+            return;
+        }
+        if (action == 5) {
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_BLOCK_ZONE, RS_PANEL_UI_ACTION_REPLACE);
+            return;
+        }
+        if (action == 6) {
+            view.startIndicationTest();
+            return;
+        }
+    }
 }
 
 void ScreenMenuPresenter::onAppTick()

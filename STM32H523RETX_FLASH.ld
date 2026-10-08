@@ -39,13 +39,13 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 
 _Min_Heap_Size = 0x200; /* required amount of heap */
-_Min_Stack_Size = 0x400; /* required amount of stack */
+_Min_Stack_Size = 0x1000; /* required amount of stack */
 
 /* Memories definition */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 272K
-  FLASH    (rx)    : ORIGIN = 0x0800E000,   LENGTH = 28*8K/*224K*/
+  FLASH    (rx)    : ORIGIN = 0x08000000,/*0x0800E000,*/   LENGTH = 28*8K/*224K*/
   FLASH_CFG (r)    : ORIGIN = 0x0807E000,   LENGTH = 8K
 }
 
