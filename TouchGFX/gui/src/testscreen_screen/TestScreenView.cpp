@@ -4,8 +4,18 @@
 #include <cstdio>
 
 TestScreenView::TestScreenView()
+#ifndef SIMULATOR
+    : soundMode(false)
+#endif
 {
 }
+
+#ifndef SIMULATOR
+int16_t TestScreenView::itemCount() const
+{
+    return soundMode ? SOUND_COUNT : LAMP_COUNT;
+}
+#endif
 
 int16_t TestScreenView::getSelectedIndex() const
 {
@@ -14,8 +24,9 @@ int16_t TestScreenView::getSelectedIndex() const
         return 0;
     }
 #ifndef SIMULATOR
-    if (idx >= LAMP_COUNT) {
-        return (int16_t)(LAMP_COUNT - 1);
+    const int16_t max = (int16_t)(itemCount() - 1);
+    if (idx > max) {
+        return max;
     }
 #else
     if (idx > 14) {
@@ -31,8 +42,9 @@ void TestScreenView::setSelectedIndex(int16_t index)
         index = 0;
     }
 #ifndef SIMULATOR
-    if (index >= LAMP_COUNT) {
-        index = (int16_t)(LAMP_COUNT - 1);
+    const int16_t max = (int16_t)(itemCount() - 1);
+    if (index > max) {
+        index = max;
     }
 #else
     if (index > 14) {
@@ -40,6 +52,19 @@ void TestScreenView::setSelectedIndex(int16_t index)
     }
 #endif
     scrollWheel1.animateToItem(index, 10);
+}
+
+void TestScreenView::setSoundMode(bool sound)
+{
+#ifndef SIMULATOR
+    soundMode = sound;
+    scrollWheel1.setNumberOfItems(itemCount());
+    for (int i = 0; i < scrollWheel1ListItems.getNumberOfDrawables(); i++) {
+        scrollWheel1.itemChanged(i);
+    }
+#else
+    (void)sound;
+#endif
 }
 
 #ifndef SIMULATOR
@@ -62,7 +87,11 @@ void TestScreenView::updateStatusLine(int16_t index, uint8_t on)
 #ifndef SIMULATOR
     (void)index;
     char line[16] = {0};
-    (void)std::snprintf(line, sizeof(line), "%s", (on != 0u) ? "Вкл" : "Выкл");
+    if (soundMode) {
+        (void)std::snprintf(line, sizeof(line), "%s", (on != 0u) ? "Играет" : "Стоп");
+    } else {
+        (void)std::snprintf(line, sizeof(line), "%s", (on != 0u) ? "Вкл" : "Выкл");
+    }
     Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(line), statusLineBuffer, STATUS_LINE_SIZE);
     statusLineBuffer[STATUS_LINE_SIZE - 1] = 0;
     statusLineText.invalidate();
@@ -95,9 +124,14 @@ void TestScreenView::scrollWheel1UpdateItem(mainmenu& item, int16_t itemIndex)
     if (itemIndex < 0) {
         itemIndex = 0;
     }
-    if (itemIndex >= LAMP_COUNT) {
-        itemIndex = (int16_t)(LAMP_COUNT - 1);
+    const int16_t max = (int16_t)(itemCount() - 1);
+    if (itemIndex > max) {
+        itemIndex = max;
     }
-    item.updateTestLampText(itemIndex);
+    if (soundMode) {
+        item.updateTestSoundText(itemIndex);
+    } else {
+        item.updateTestLampText(itemIndex);
+    }
 }
 #endif

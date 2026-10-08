@@ -65,9 +65,16 @@ typedef struct
 	uint16_t off_ticks;
 	uint16_t repeat_ticks;
 	uint8_t pulses_total;
+	/* Точная фаза: иначе после BTN_ACK дежурный стартует заново и «прилипает» к клику. */
+	uint8_t pulses_left;
+	uint8_t sound_phase;
+	uint16_t pattern_counter;
+	uint16_t pattern_repeat_counter;
+	uint16_t note_hz;
 } BeeperResumeCtx_t;
 
 static BeeperResumeCtx_t g_resume_ctx = {0};
+static uint16_t s_current_note_hz = 0u;
 
 static volatile uint8_t s_tone_running = 0u;
 static volatile uint32_t s_phase = 0u;
@@ -77,6 +84,49 @@ static volatile uint32_t s_sweep_samples_left = 0u;
 static uint8_t s_tim6_ready = 0u;
 static uint16_t s_ack_cooldown_ticks = 0u;
 static uint32_t s_oneshot_end_ms = 0u;
+
+/* ТЕСТ3: захват звукового канала. */
+static uint8_t s_beeper_test_mode = 0u;
+static uint8_t s_beeper_test_api = 0u; /* 1 = вызов из TestPlay/TestStop */
+static uint8_t s_beeper_test_saved_mute = 1u;
+static uint16_t s_beeper_test_stop_ticks = 0u;
+/* Дежурные: стоп после N завершённых пакетов (не по wall-clock 2×REPEAT). */
+static uint8_t s_beeper_test_bursts_left = 0u;
+/* Временный звук при mute (клик кнопки / тест индикации). */
+static uint8_t s_sound_override = 0u;
+
+static uint8_t Beeper_TestModeBlocksExternal(void)
+{
+	return (s_beeper_test_mode != 0u && s_beeper_test_api == 0u) ? 1u : 0u;
+}
+
+static uint8_t Beeper_IsAudible(void)
+{
+	if (s_beeper_test_api != 0u || s_sound_override != 0u) {
+		return 1u;
+	}
+	return (beep_sound != 0u) ? 1u : 0u;
+}
+
+static void Beeper_TestClearDeadline(void)
+{
+	s_beeper_test_stop_ticks = 0u;
+	s_beeper_test_bursts_left = 0u;
+}
+
+static void Beeper_TestArmBurstCount(uint8_t bursts)
+{
+	s_beeper_test_stop_ticks = 0u;
+	s_beeper_test_bursts_left = bursts;
+}
+
+static void Beeper_TestForceAllOff(void)
+{
+	s_beeper_test_api = 1u;
+	Beeper_TestClearDeadline();
+	Beeper_AllOff();
+	s_beeper_test_api = 0u;
+}
 
 /* 64 точки, 12 бит, середина 2048, амплитуда 1800. */
 static const uint16_t s_sine[BEEPER_SINE_POINTS] = {
@@ -103,6 +153,7 @@ static void Beeper_ArmOneShotMs(uint16_t duration_ms)
 
 static void Beeper_SetNoteHz(uint16_t hz)
 {
+	s_current_note_hz = hz;
 	s_sweep_inc_step = 0u;
 	s_sweep_samples_left = 0u;
 	if (hz == 0u) {
@@ -116,6 +167,12 @@ static uint16_t Beeper_MsToTicks(uint16_t duration_ms)
 {
 	uint16_t ticks = (uint16_t)((duration_ms + 9u) / 10u);
 	return (ticks == 0u) ? 1u : ticks;
+}
+
+static void Beeper_TestArmStopMs(uint16_t duration_ms)
+{
+	s_beeper_test_bursts_left = 0u;
+	s_beeper_test_stop_ticks = Beeper_MsToTicks(duration_ms);
 }
 
 /***********************************************************************************************************/
@@ -166,7 +223,7 @@ static void Beeper_Tim6Configure(void)
 static void Beeper_DacWrite(uint32_t level)
 {
 	//TODO DELETE  return;
-	return;
+	//return;
 
 	if (level > SOUND_DAC_LEVEL_MAX) {
 		level = SOUND_DAC_LEVEL_MAX;
@@ -248,11 +305,13 @@ static void Beeper_ToneStop(void)
 
 void Beeper_ToneStart(void)
 {
+	if (Beeper_IsAudible() == 0u) {
+		return;
+	}
 	if (s_tim6_ready == 0u) {
 		Beeper_DacInit();
 	}
 
-	beep_sound = 1u;
 	if (s_phase_inc == 0u) {
 		Beeper_SetNoteHz(SOUND_TONE_HZ);
 	}
@@ -370,6 +429,7 @@ static void Beeper_CaptureResumeStateIfNeeded(void)
 	    beeper_state == BEEPER_STATE_FIRE_ALARM) {
 		g_resume_ctx.valid = 1u;
 		g_resume_ctx.state = beeper_state;
+		g_resume_ctx.note_hz = (s_current_note_hz != 0u) ? s_current_note_hz : SOUND_FIRE_TONE_HZ;
 		return;
 	}
 	if (beeper_state == BEEPER_STATE_PATTERN && pattern_repeat_ticks > 0u) {
@@ -379,11 +439,17 @@ static void Beeper_CaptureResumeStateIfNeeded(void)
 		g_resume_ctx.off_ticks = pattern_off_ticks;
 		g_resume_ctx.repeat_ticks = pattern_repeat_ticks;
 		g_resume_ctx.pulses_total = pattern_pulses_total;
+		g_resume_ctx.pulses_left = pattern_pulses_left;
+		g_resume_ctx.sound_phase = pattern_sound_phase;
+		g_resume_ctx.pattern_counter = pattern_counter;
+		g_resume_ctx.pattern_repeat_counter = pattern_repeat_counter;
+		g_resume_ctx.note_hz = (s_current_note_hz != 0u) ? s_current_note_hz : NOTE_B6;
 	}
 }
 
 static void Beeper_RestoreAfterOneShot(void)
 {
+	s_sound_override = 0u;
 	if (!g_resume_ctx.valid) {
 		beeper_state = BEEPER_STATE_IDLE;
 		Beeper_Off();
@@ -395,6 +461,7 @@ static void Beeper_RestoreAfterOneShot(void)
 		beeper_state = g_resume_ctx.state;
 		beeper_counter = 0u;
 		beep_phase = 0u;
+		Beeper_SetNoteHz(g_resume_ctx.note_hz);
 		Beeper_On();
 		g_resume_ctx.valid = 0u;
 		return;
@@ -405,12 +472,17 @@ static void Beeper_RestoreAfterOneShot(void)
 		pattern_off_ticks = g_resume_ctx.off_ticks;
 		pattern_repeat_ticks = g_resume_ctx.repeat_ticks;
 		pattern_pulses_total = g_resume_ctx.pulses_total;
-		pattern_pulses_left = g_resume_ctx.pulses_total;
-		pattern_sound_phase = 1u;
-		pattern_counter = pattern_on_ticks;
-		pattern_repeat_counter = 0u;
+		pattern_pulses_left = g_resume_ctx.pulses_left;
+		pattern_sound_phase = g_resume_ctx.sound_phase;
+		pattern_counter = g_resume_ctx.pattern_counter;
+		pattern_repeat_counter = g_resume_ctx.pattern_repeat_counter;
 		beeper_state = BEEPER_STATE_PATTERN;
-		Beeper_On();
+		Beeper_SetNoteHz(g_resume_ctx.note_hz);
+		if (pattern_sound_phase != 0u) {
+			Beeper_On();
+		} else {
+			Beeper_Off();
+		}
 		g_resume_ctx.valid = 0u;
 		return;
 	}
@@ -496,6 +568,12 @@ void Beeper_LongBeep1300ms(void)
  */
 void Beeper_ContinuousOn(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
+	if (Beeper_IsAudible() == 0u) {
+		return;
+	}
 	g_resume_ctx.valid = 0u;
 	beeper_state = BEEPER_STATE_CONTINUOUS;
 	beeper_counter = 0;
@@ -506,6 +584,12 @@ void Beeper_ContinuousOn(void)
 
 void Beeper_FireAlarmOn(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
+	if (Beeper_IsAudible() == 0u) {
+		return;
+	}
 	/* Непрерывный тон на резонансе KPEG116 (2.0 kHz) — максимум громкости. */
 	g_resume_ctx.valid = 0u;
 	beeper_state = BEEPER_STATE_CONTINUOUS;
@@ -528,6 +612,9 @@ void Beeper_FireAlarmOff(void)
  */
 void Beeper_ContinuousOff(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
 	if (beeper_state == BEEPER_STATE_CONTINUOUS)
 	{
 		beeper_state = BEEPER_STATE_IDLE;
@@ -538,6 +625,9 @@ void Beeper_ContinuousOff(void)
 
 void Beeper_StopPattern(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
 	/* Сбрасываем resume всегда: SOUND_OFF мог прийти во время BTN_ACK (LONG_BEEP),
 	 * когда state != PATTERN — иначе после клика снова стартует START_ALL_HOLD. */
 	g_resume_ctx.valid = 0u;
@@ -552,6 +642,9 @@ void Beeper_StopPattern(void)
  */
 void Beeper_AllOff(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
 	g_resume_ctx.valid = 0u;
 	beeper_state = BEEPER_STATE_IDLE;
 	pattern_repeat_ticks = 0u;
@@ -577,7 +670,7 @@ void Beeper_ContinuousToggle(void)
 
 void Beeper_PlayOneShotMs(uint16_t duration_ms)
 {
-	beep_sound = 1u;
+	s_sound_override = 1u;
 	beeper_state = BEEPER_STATE_LONG_BEEP;
 	beeper_counter = Beeper_MsToTicks(duration_ms);
 	beep_phase = 0u;
@@ -605,6 +698,12 @@ void Beeper_StartupBeep(void)
 
 void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
+	if (Beeper_IsAudible() == 0u) {
+		return;
+	}
 	if (pulses == 0u) {
 		Beeper_StopPattern();
 		return;
@@ -625,6 +724,9 @@ void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t
 
 void Beeper_ButtonAcknowledge(void)
 {
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
 	if (s_ack_cooldown_ticks > 0u) {
 		return;
 	}
@@ -640,7 +742,8 @@ void Beeper_ButtonAcknowledge(void)
 	    g_resume_ctx.pulses_total == 1u) {
 		g_resume_ctx.valid = 0u;
 	}
-	beep_sound = 1u;
+	/* Клик слышен даже при mute; mute не снимаем. */
+	s_sound_override = 1u;
 	beeper_state = BEEPER_STATE_LONG_BEEP;
 	beeper_counter = Beeper_MsToTicks(SOUND_JUMP_MS);
 	beep_phase = 0u;
@@ -670,6 +773,104 @@ void Beeper_PlayIndicationTest(void)
 	Beeper_RestoreAfterOneShot();
 }
 
+void Beeper_EnterTestMode(void)
+{
+	if (s_beeper_test_mode != 0u) {
+		return;
+	}
+	s_beeper_test_saved_mute = beep_sound;
+	s_beeper_test_mode = 1u;
+	Beeper_TestForceAllOff();
+	beep_sound = 1u;
+}
+
+void Beeper_ExitTestMode(void)
+{
+	if (s_beeper_test_mode == 0u) {
+		return;
+	}
+	Beeper_TestForceAllOff();
+	s_beeper_test_mode = 0u;
+	beep_sound = s_beeper_test_saved_mute;
+}
+
+uint8_t Beeper_IsTestMode(void)
+{
+	return s_beeper_test_mode;
+}
+
+void Beeper_TestStop(void)
+{
+	if (s_beeper_test_mode == 0u) {
+		return;
+	}
+	Beeper_TestForceAllOff();
+}
+
+uint8_t Beeper_IsTestPlaying(void)
+{
+	if (s_beeper_test_mode == 0u) {
+		return 0u;
+	}
+	return (s_beeper_test_stop_ticks > 0u || s_beeper_test_bursts_left > 0u) ? 1u : 0u;
+}
+
+void Beeper_TestPlay(uint8_t profile_id)
+{
+	if (s_beeper_test_mode == 0u || profile_id >= (uint8_t)BEEPER_TEST_PROFILE_COUNT) {
+		return;
+	}
+
+	s_beeper_test_api = 1u;
+	Beeper_TestClearDeadline();
+	Beeper_AllOff();
+	beep_sound = 1u;
+
+	switch ((BeeperTestProfile_t)profile_id) {
+	case BEEPER_TEST_PROFILE_FIRE1_SIGNAL:
+		Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
+		                       SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
+		Beeper_TestArmStopMs(10000u);
+		break;
+	case BEEPER_TEST_PROFILE_FIRE1_DUTY:
+		Beeper_StartPulseTrain(SOUND_FIRE1_DUTY_ON_MS, SOUND_FIRE1_DUTY_OFF_MS,
+		                       SOUND_FIRE1_DUTY_PULSES, SOUND_FIRE1_DUTY_REPEAT_MS);
+		Beeper_TestArmBurstCount(2u);
+		break;
+	case BEEPER_TEST_PROFILE_FIRE2_SIGNAL:
+		Beeper_FireAlarmOn();
+		Beeper_TestArmStopMs(10000u);
+		break;
+	case BEEPER_TEST_PROFILE_FIRE2_DUTY:
+		Beeper_StartPulseTrain(SOUND_FIRE_DUTY_ON_MS, SOUND_FIRE_DUTY_OFF_MS,
+		                       SOUND_FIRE_DUTY_PULSES, SOUND_FIRE_DUTY_REPEAT_MS);
+		Beeper_TestArmBurstCount(2u);
+		break;
+	case BEEPER_TEST_PROFILE_FAULT_SIGNAL:
+		/* Нет штатного REPEAT — цикл = длительность сигнального пакета. */
+		Beeper_StartPulseTrain(SOUND_FAULT_SIGNAL_ON_MS, SOUND_FAULT_SIGNAL_OFF_MS,
+		                       SOUND_FAULT_SIGNAL_PULSES,
+		                       (uint16_t)(SOUND_FAULT_SIGNAL_ON_MS * SOUND_FAULT_SIGNAL_PULSES +
+		                                  SOUND_FAULT_SIGNAL_OFF_MS * SOUND_FAULT_SIGNAL_PULSES));
+		Beeper_TestArmStopMs(10000u);
+		break;
+	case BEEPER_TEST_PROFILE_FAULT_DUTY:
+		Beeper_StartPulseTrain(SOUND_FAULT_DUTY_ON_MS, SOUND_FAULT_DUTY_OFF_MS,
+		                       SOUND_FAULT_DUTY_PULSES, SOUND_FAULT_DUTY_REPEAT_MS);
+		Beeper_TestArmBurstCount(2u);
+		break;
+	case BEEPER_TEST_PROFILE_START:
+		Beeper_StartPulseTrain(SOUND_START_DUTY_ON_MS, SOUND_START_DUTY_OFF_MS,
+		                       SOUND_START_DUTY_PULSES, SOUND_START_DUTY_REPEAT_MS);
+		Beeper_TestArmStopMs(10000u);
+		break;
+	default:
+		break;
+	}
+
+	s_beeper_test_api = 0u;
+}
+
 /**
  * @brief Функция обработки состояния пищалки (вызывать каждые 10мс)
  * @note Должна вызываться из таймера или основного цикла с периодом 10мс
@@ -680,7 +881,15 @@ void Beeper_Process(void)
 		s_ack_cooldown_ticks--;
 	}
 
-	if (MenuUi_IsConfigSessionActive() && !Beeper_IsOneShotState(beeper_state)) {
+	if (s_beeper_test_mode != 0u && s_beeper_test_stop_ticks > 0u) {
+		s_beeper_test_stop_ticks--;
+		if (s_beeper_test_stop_ticks == 0u) {
+			Beeper_TestForceAllOff();
+		}
+	}
+
+	if (s_beeper_test_mode == 0u &&
+	    MenuUi_IsConfigSessionActive() && !Beeper_IsOneShotState(beeper_state)) {
 		Beeper_Off();
 		return;
 	}
@@ -773,6 +982,14 @@ void Beeper_Process(void)
 					pattern_sound_phase = 1u;
 					pattern_counter = pattern_on_ticks;
 				} else {
+					/* Пакет (burst) завершён. */
+					if (s_beeper_test_mode != 0u && s_beeper_test_bursts_left > 0u) {
+						s_beeper_test_bursts_left--;
+						if (s_beeper_test_bursts_left == 0u) {
+							Beeper_TestForceAllOff();
+							break;
+						}
+					}
 					if (pattern_repeat_ticks == 0u) {
 						beeper_state = BEEPER_STATE_IDLE;
 						Beeper_Off();
@@ -801,12 +1018,21 @@ void Beeper_Process(void)
 }
 
 void Beeper_SoundOnOff(bool soundOn) {
-	beep_sound = soundOn ? 1u : 0u;
+	if (Beeper_TestModeBlocksExternal() != 0u) {
+		return;
+	}
+	const uint8_t next = soundOn ? 1u : 0u;
+	const uint8_t prev = beep_sound;
+	beep_sound = next;
 	if (!soundOn) {
+		s_sound_override = 0u;
 		s_ack_cooldown_ticks = 0u;
 		g_resume_ctx.valid = 0u;
 		beeper_state = BEEPER_STATE_IDLE;
 		Beeper_Off();
+	}
+	if (prev != next && g_sound_state_ui_cb != 0) {
+		g_sound_state_ui_cb(soundOn);
 	}
 }
 
@@ -829,6 +1055,7 @@ void Beeper_ResumeSoundOnNewEvent(void)
 	}
 	beep_sound = 1u;
 	host->beep = 1u;
+	MenuUi_SetSoundValue(1u, host->beep_block);
 	if (g_sound_state_ui_cb != 0) {
 		g_sound_state_ui_cb(true);
 	}

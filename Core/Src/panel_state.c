@@ -122,7 +122,8 @@ static uint8_t panel_state_is_remote_connection_button(uint16_t screen, uint8_t 
 static uint8_t panel_state_is_local_test_nav_button(uint16_t screen, uint8_t btn)
 {
     if (screen != RS_PANEL_SCREEN_MENU_TEST_SELECT &&
-        screen != RS_PANEL_SCREEN_MENU_TEST_LAMPS) {
+        screen != RS_PANEL_SCREEN_MENU_TEST_LAMPS &&
+        screen != RS_PANEL_SCREEN_MENU_TEST_SOUND) {
         return 0u;
     }
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
@@ -154,6 +155,7 @@ static uint16_t panel_state_route_screen(uint16_t screen)
     case RS_PANEL_SCREEN_MENU_SOUND:
     case RS_PANEL_SCREEN_MENU_TEST_SELECT:
     case RS_PANEL_SCREEN_MENU_TEST_LAMPS:
+    case RS_PANEL_SCREEN_MENU_TEST_SOUND:
     case RS_PANEL_SCREEN_MENU_ROOT:
     case RS_PANEL_SCREEN_MAIN:
     case RS_PANEL_SCREEN_LOGO:
@@ -367,7 +369,9 @@ static void panel_state_fill_caps(PanelStateContext *ctx)
     is_small = PANEL_TYPE_IS_SMALL(pcfg->panel_type) ? 1u : 0u;
 
     ctx->caps.fw_ver = (uint16_t)GetAppVersionU32();
-    ctx->caps.hw_id = 1u;
+    /* Формфактор PANEL_TYPE_1/2/3: и в CAPS.ui_profile, и в hw_id —
+     * ACTIVITY (1 Гц) несёт hw_id, ПО видит тип без CAPS_REQ. */
+    ctx->caps.hw_id = (uint16_t)PANEL_TYPE_NORMALIZE(pcfg->panel_type);
     ctx->caps.ui_profile = PANEL_TYPE_NORMALIZE(pcfg->panel_type);
     ctx->caps.disp_w = 128u;
     ctx->caps.disp_h = 64u;

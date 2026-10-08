@@ -96,6 +96,12 @@ extern "C" void PanelUiBridge_GotoScreen(uint16_t screen_id, uint8_t action)
         MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_TEST_LAMPS);
         panel_ui_app().gotoTestScreenNoTransition();
         break;
+    case RS_PANEL_SCREEN_MENU_TEST_SOUND:
+        MenuUi_SetMainScreenActive(0u);
+        MenuUi_SetConfigSession(0u);
+        MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_TEST_SOUND);
+        panel_ui_app().gotoTestScreenNoTransition();
+        break;
     default:
         break;
     }

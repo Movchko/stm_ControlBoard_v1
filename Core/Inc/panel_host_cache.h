@@ -43,6 +43,12 @@ void PanelHostCache_Init(void);
 PanelHostCache *PanelHostCache_Get(void);
 const PanelHostCache *PanelHostCache_GetConst(void);
 
+/**
+ * Применить beep / beep_block с хоста (MENU_TOGGLE или v3 SYS).
+ * Синхронизирует MenuUi, кэш и Beeper; UI — через Beeper_SoundStateUiCallback.
+ */
+void PanelHostCache_ApplySoundState(uint8_t sound_on, uint8_t blocked);
+
 #ifdef __cplusplus
 }
 #endif

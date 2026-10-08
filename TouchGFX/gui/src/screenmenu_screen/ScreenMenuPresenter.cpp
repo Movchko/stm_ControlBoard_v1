@@ -111,8 +111,7 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
             PanelHostCache_Get()->beep = soundOn ? 1u : 0u;
             MenuUi_SetSoundValue(soundOn ? 1u : 0u, MenuUi_IsSoundBlocked());
             EventLog_LogSoundToggle(soundOn ? 1u : 0u, 0u);
-            /* SOUND_SET на хост: panel_state → Drain при MENU_SOUND; здесь только UI.
-             * На корневом меню v3 SOUND_SET шлём явно (нет отдельного экрана SOUND). */
+            /* Оптимистично локально; ППКУ подтвердит SYS flags / при DENIED откатит. */
             if (RsPanelV3Slave_IsV3Active() != 0u) {
                 (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_SOUND_SET, 0u,
                                                soundOn ? 1u : 0u, 0u, 0u);
@@ -120,6 +119,9 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
             if (model) {
                 model->setSoundOn(soundOn);
                 model->notifySoundToggled(soundOn);
+            }
+            if (soundOn) {
+                RsPanelV3Slave_OnSoundEnabled();
             }
             refreshLine();
             return;

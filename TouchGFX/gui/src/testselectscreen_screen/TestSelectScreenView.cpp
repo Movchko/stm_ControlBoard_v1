@@ -61,7 +61,7 @@ void TestSelectScreenView::updateDescription(int16_t index)
         desc = "Перекл. LED";
         break;
     case 2:
-        desc = "Профили звука";
+        desc = "Проверка звуков";
         break;
     default:
         break;

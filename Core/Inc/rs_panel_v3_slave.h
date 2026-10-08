@@ -39,6 +39,8 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx);
 uint8_t RsPanelV3Slave_IsV3Active(void);
 /** После восстановления связи с ППКУ — снова отдать текущий список неисправностей. */
 void RsPanelV3Slave_RequestFaultUiRefresh(void);
+/** После unmute — вернуть дежурный звук неисправности, если неисправности ещё есть. */
+void RsPanelV3Slave_OnSoundEnabled(void);
 
 #ifdef __cplusplus
 }

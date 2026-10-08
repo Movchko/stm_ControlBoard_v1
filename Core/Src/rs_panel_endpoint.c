@@ -529,6 +529,9 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
     if (RsPanelV3Slave_IsV3Active() != 0u) {
         return;
     }
+    if (Beeper_IsTestMode() != 0u) {
+        return;
+    }
     if (cmd == 0) {
         return;
     }
@@ -541,8 +544,8 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
         return;
     }
 
-    PanelHostCache_Get()->beep = (cmd->mute == 0u) ? 1u : 0u;
-    Beeper_SoundOnOff(cmd->mute == 0u);
+    PanelHostCache_ApplySoundState((cmd->mute == 0u) ? 1u : 0u,
+                                   PanelHostCache_Get()->beep_block);
     if (cmd->mute != 0u) {
         Beeper_AllOff();
         s_last_sound_cmd = *cmd;
@@ -939,7 +942,7 @@ static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, u
             uint8_t value = payload[2];
             uint8_t blocked = payload[3];
             if (item_id == 1u) {
-                MenuUi_SetSoundValue(value, blocked);
+                PanelHostCache_ApplySoundState(value, blocked);
             }
         }
         break;
@@ -1096,9 +1099,11 @@ static void rs_send_activity(RsPanelEndpoint *endpoint)
         return;
     }
     cfg = PanelCfg_Get();
-    payload[pos++] = (uint8_t)DEVICE_PANEL_TYPE;
+    payload[pos++] = (uint8_t)DEVICE_PANEL_TYPE; /* класс устройства = панель (30) */
     pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.fw_ver));
-    pos = (uint16_t)(pos + rs_put_u16le(&payload[pos], endpoint->state.caps.hw_id));
+    /* ACTIVITY.hw_id = формфактор PANEL_TYPE_1/2/3 (не путать с DEVICE_PANEL_TYPE). */
+    pos = (uint16_t)(pos + rs_put_u16le(&payload[pos],
+                                        (uint16_t)PANEL_TYPE_NORMALIZE(cfg->panel_type)));
     payload[pos++] = endpoint->state.caps.status;
     payload[pos++] = (uint8_t)(g_uptime_sec & 0xFFu);
     payload[pos++] = (uint8_t)((g_uptime_sec >> 8) & 0xFFu);

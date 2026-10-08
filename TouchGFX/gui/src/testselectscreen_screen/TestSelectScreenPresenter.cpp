@@ -73,7 +73,11 @@ void TestSelectScreenPresenter::handleButton(uint8_t but, uint8_t state)
             PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_TEST_LAMPS, RS_PANEL_UI_ACTION_REPLACE);
             return;
         }
-        /* ТЕСТ3: заглушка. */
+        if (currentIndex == 2) {
+            /* ТЕСТ3: проверка звуков. */
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_TEST_SOUND, RS_PANEL_UI_ACTION_REPLACE);
+            return;
+        }
         return;
     }
 }

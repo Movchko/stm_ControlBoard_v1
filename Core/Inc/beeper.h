@@ -116,6 +116,26 @@ void Beeper_ButtonAcknowledge(void);
  */
 void Beeper_PlayIndicationTest(void);
 
+/* ТЕСТ3: захват звука (хост / внутренняя логика не перебивают). */
+typedef enum {
+	BEEPER_TEST_PROFILE_FIRE1_SIGNAL = 0,
+	BEEPER_TEST_PROFILE_FIRE1_DUTY,
+	BEEPER_TEST_PROFILE_FIRE2_SIGNAL,
+	BEEPER_TEST_PROFILE_FIRE2_DUTY,
+	BEEPER_TEST_PROFILE_FAULT_SIGNAL,
+	BEEPER_TEST_PROFILE_FAULT_DUTY,
+	BEEPER_TEST_PROFILE_START,
+	BEEPER_TEST_PROFILE_COUNT
+} BeeperTestProfile_t;
+
+void Beeper_EnterTestMode(void);
+void Beeper_ExitTestMode(void);
+uint8_t Beeper_IsTestMode(void);
+/** Стоп предыдущего, старт профиля; стоп по таймеру (10 с / 2 цикла). */
+void Beeper_TestPlay(uint8_t profile_id);
+void Beeper_TestStop(void);
+uint8_t Beeper_IsTestPlaying(void);
+
 /**
  * @brief Функция установки параметра звука ВКЛ/ВЫКЛ
  * Параметр сохраняемый в настройках

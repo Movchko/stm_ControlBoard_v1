@@ -12,6 +12,7 @@ public:
     void updateConnectionText(int16_t value);
     void updateTestSelectText(int16_t value);
     void updateTestLampText(int16_t value);
+    void updateTestSoundText(int16_t value);
     virtual void initialize();
 protected:
 };

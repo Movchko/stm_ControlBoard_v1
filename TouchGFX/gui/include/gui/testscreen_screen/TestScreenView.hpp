@@ -16,10 +16,12 @@ public:
     int16_t getSelectedIndex() const;
     void setSelectedIndex(int16_t index);
     void updateStatusLine(int16_t index, uint8_t on);
+    void setSoundMode(bool sound);
 
 #ifndef SIMULATOR
     virtual void scrollWheel1UpdateItem(mainmenu& item, int16_t itemIndex) override;
     static const int16_t LAMP_COUNT = 15;
+    static const int16_t SOUND_COUNT = 7;
 #endif
 
 protected:
@@ -27,7 +29,9 @@ protected:
     static const uint16_t STATUS_LINE_SIZE = 16;
     touchgfx::Unicode::UnicodeChar statusLineBuffer[STATUS_LINE_SIZE];
     touchgfx::TextAreaWithOneWildcard statusLineText;
+    bool soundMode;
     void initStatusLineText();
+    int16_t itemCount() const;
 #endif
 };
 

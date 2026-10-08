@@ -169,6 +169,21 @@ static void rs_v3_restore_start_all_idle_leds(void)
     Led_Set(LED_STR_START_ALL, 1u);
 }
 
+/* START_ALL hold подменяет паттерн и сбрасывает resume — вернуть дежурную неисправность. */
+static void rs_v3_restore_fault_beep_if_needed(void)
+{
+    if (s_active_fault_count == 0u) {
+        return;
+    }
+    Beeper_StartPulseTrain(SOUND_FAULT_DUTY_ON_MS, SOUND_FAULT_DUTY_OFF_MS,
+                           SOUND_FAULT_DUTY_PULSES, SOUND_FAULT_DUTY_REPEAT_MS);
+}
+
+void RsPanelV3Slave_OnSoundEnabled(void)
+{
+    rs_v3_restore_fault_beep_if_needed();
+}
+
 static void rs_v3_recalc_catalog_crc(void)
 {
     s_devices_crc = RsPanelV3_DeviceCatalogCrc(s_device_catalog, s_device_catalog_count);
@@ -530,6 +545,8 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
         if (s_active_fault_count < RS_PANEL_V3_MAX_FAULTS) {
             s_active_faults[s_active_fault_count] = *fe;
             s_active_fault_count++;
+            /* Новая неисправность: вернуть звук после ручного mute (ГОСТ). */
+            Beeper_ResumeSoundOnNewEvent();
             Beeper_StartPulseTrain(SOUND_FAULT_DUTY_ON_MS, SOUND_FAULT_DUTY_OFF_MS,
                                    SOUND_FAULT_DUTY_PULSES, SOUND_FAULT_DUTY_REPEAT_MS);
             Led_Set(LED_ERR, 1u);
@@ -633,6 +650,19 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
         s_has_faults = ((poll.sys.flags & RS_PANEL_V3_SYS_HAS_FAULTS) != 0u) ? 1u : 0u;
         s_power_input_fault =
             ((poll.sys.flags & RS_PANEL_V3_SYS_POWER_INPUT_FAULT) != 0u) ? 1u : 0u;
+
+        /* ППКУ — источник истины для mute / beep_block (в т.ч. откат при ACK_DENIED). */
+        {
+            const uint8_t prev_beep = PanelHostCache_GetConst()->beep;
+            const uint8_t sound_on =
+                ((poll.sys.flags & RS_PANEL_V3_SYS_SOUND_ON) != 0u) ? 1u : 0u;
+            const uint8_t sound_blk =
+                ((poll.sys.flags & RS_PANEL_V3_SYS_SOUND_BLOCKED) != 0u) ? 1u : 0u;
+            PanelHostCache_ApplySoundState(sound_on, sound_blk);
+            if (prev_beep == 0u && sound_on != 0u) {
+                rs_v3_restore_fault_beep_if_needed();
+            }
+        }
 
         if (prev_ready == 0u && s_sys_ready != 0u) {
             /* В UART только очередь: WARN → SYS_READY в ProcessDeferredUi (TouchGFX).
@@ -782,6 +812,7 @@ void RsPanelV3Slave_OnButtonSample(void)
             s_hold_start_all_committed == 0u) {
             s_hold_start_all_committed = 1u;
             Beeper_StopPattern();
+            rs_v3_restore_fault_beep_if_needed();
             (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_ALL_COMMIT, 0u, 0u, 0u, 0u);
             rs_v3_restore_start_all_idle_leds();
         }
@@ -797,6 +828,7 @@ void RsPanelV3Slave_OnButtonSample(void)
         s_hold_start_all_ms = 0u;
         if (s_hold_start_all_committed == 0u) {
             Beeper_StopPattern();
+            rs_v3_restore_fault_beep_if_needed();
         }
         s_hold_start_all_committed = 0u;
         rs_v3_restore_start_all_idle_leds();

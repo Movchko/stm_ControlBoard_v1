@@ -20,6 +20,8 @@ public:
 
 #ifndef SIMULATOR
     virtual void handleButton(uint8_t but, uint8_t state) override;
+    virtual void onAppTick() override;
+    bool isSoundMode() const { return soundMode; }
 #endif
 
 private:
@@ -29,7 +31,10 @@ private:
 
 #ifndef SIMULATOR
     int16_t currentIndex;
+    bool soundMode;
+    uint8_t lastPlaying;
     void refreshStatus();
+    int16_t itemCount() const;
 #endif
 };
 
