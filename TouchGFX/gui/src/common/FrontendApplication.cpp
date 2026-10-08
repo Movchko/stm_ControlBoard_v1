@@ -17,6 +17,10 @@
 #include <gui/screenmenu_mcu_details_screen/ScreenMenu_MCU_DetailsPresenter.hpp>
 #include <gui/screenblockzone_screen/ScreenBlockZoneView.hpp>
 #include <gui/screenblockzone_screen/ScreenBlockZonePresenter.hpp>
+#include <gui/testselectscreen_screen/TestSelectScreenView.hpp>
+#include <gui/testselectscreen_screen/TestSelectScreenPresenter.hpp>
+#include <gui/testscreen_screen/TestScreenView.hpp>
+#include <gui/testscreen_screen/TestScreenPresenter.hpp>
 #include <touchgfx/transitions/NoTransition.hpp>
 
 #ifndef SIMULATOR
@@ -154,4 +158,26 @@ void FrontendApplication::gotoScreenBlockZoneScreenNoTransition()
 void FrontendApplication::gotoScreenBlockZoneScreenNoTransitionImpl()
 {
     makeTransition<ScreenBlockZoneView, ScreenBlockZonePresenter, NoTransition, Model>(&currentScreen, &currentPresenter, frontendHeap, &currentTransition, &model);
+}
+
+void FrontendApplication::gotoTestSelectScreenNoTransition()
+{
+    testSelectTransitionCallback = Callback<FrontendApplication>(this, &FrontendApplication::gotoTestSelectScreenNoTransitionImpl);
+    pendingScreenTransitionCallback = &testSelectTransitionCallback;
+}
+
+void FrontendApplication::gotoTestSelectScreenNoTransitionImpl()
+{
+    makeTransition<TestSelectScreenView, TestSelectScreenPresenter, NoTransition, Model>(&currentScreen, &currentPresenter, frontendHeap, &currentTransition, &model);
+}
+
+void FrontendApplication::gotoTestScreenNoTransition()
+{
+    testScreenTransitionCallback = Callback<FrontendApplication>(this, &FrontendApplication::gotoTestScreenNoTransitionImpl);
+    pendingScreenTransitionCallback = &testScreenTransitionCallback;
+}
+
+void FrontendApplication::gotoTestScreenNoTransitionImpl()
+{
+    makeTransition<TestScreenView, TestScreenPresenter, NoTransition, Model>(&currentScreen, &currentPresenter, frontendHeap, &currentTransition, &model);
 }

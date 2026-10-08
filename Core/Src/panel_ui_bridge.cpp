@@ -84,6 +84,18 @@ extern "C" void PanelUiBridge_GotoScreen(uint16_t screen_id, uint8_t action)
         MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_DEVICE_DETAIL);
         panel_ui_app().gotoScreenMenuMcuDetailsScreenNoTransition();
         break;
+    case RS_PANEL_SCREEN_MENU_TEST_SELECT:
+        MenuUi_SetMainScreenActive(0u);
+        MenuUi_SetConfigSession(0u);
+        MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_TEST_SELECT);
+        panel_ui_app().gotoTestSelectScreenNoTransition();
+        break;
+    case RS_PANEL_SCREEN_MENU_TEST_LAMPS:
+        MenuUi_SetMainScreenActive(0u);
+        MenuUi_SetConfigSession(0u);
+        MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_TEST_LAMPS);
+        panel_ui_app().gotoTestScreenNoTransition();
+        break;
     default:
         break;
     }

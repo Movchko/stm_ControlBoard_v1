@@ -11,15 +11,16 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "panel_cfg.h"
+#include "panel_host_cache.h"
 #include "panel_journal_cache.h"
 #include "panel_ui_bridge.h"
 #include "rtc_cache.h"
 #include "rs_panel_debug.h"
+#include "panel_link_monitor.h"
 #include "Display/display.h"
 #include "backend.h"
 #include "upd.h"
 
-extern PPKYCfg PPKYConfig;
 extern UART_HandleTypeDef huart4;
 extern RTC_HandleTypeDef hrtc;
 
@@ -174,6 +175,11 @@ void RsPanelEndpoint_QueueWarningUi(uint8_t active,
 void RsPanelEndpoint_QueueSysReadyNotify(void)
 {
     s_sys_ready_pending = 1u;
+}
+
+void RsPanelEndpoint_QueueGotoMain(void)
+{
+    rs_queue_nav(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
 }
 
 void RsPanelEndpoint_ProcessDeferredUi(void)
@@ -535,7 +541,7 @@ static void rs_apply_sound(const RsPanelSoundCmd *cmd)
         return;
     }
 
-    PPKYConfig.beep = (cmd->mute == 0u) ? 1u : 0u;
+    PanelHostCache_Get()->beep = (cmd->mute == 0u) ? 1u : 0u;
     Beeper_SoundOnOff(cmd->mute == 0u);
     if (cmd->mute != 0u) {
         Beeper_AllOff();
@@ -822,10 +828,17 @@ static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload,
                 break;
             }
         }
+        const uint8_t prev_has_fault = s_warn_ui_has_fault;
         s_warn_ui_active = g_rs_panel_dbg.last_warn_active;
         s_warn_ui_has_fault = (g_rs_panel_dbg.last_warn_active != 0u) ? has_fault : 0u;
         rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault,
                             (s_fire_hold_idle != 0u) ? 0u : state->fire_active);
+        /* Новая неисправность (не ВНИМАНИЕ) — на MAIN с меню/теста. */
+        if (s_warn_ui_has_fault != 0u && prev_has_fault == 0u) {
+            if (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u) {
+                RsPanelEndpoint_QueueGotoMain();
+            }
+        }
     }
 
     rs_queue_warn_ui(g_rs_panel_dbg.last_warn_active,
@@ -1382,6 +1395,7 @@ void RsPanelEndpoint_Init(void)
     memset(&g_endpoint, 0, sizeof(g_endpoint));
     RsPanelV3Slave_Init();
     RsPanelDebug_Reset();
+    PanelLinkMonitor_Init();
     addr = PanelCfg_Init();
     g_endpoint.panel_addr = addr;
     PanelBoot_SetRsAddr(g_endpoint.panel_addr);
@@ -1416,6 +1430,7 @@ void RsPanelEndpoint_Timer10ms(void)
     g_rs_panel_dbg.pending_ui_count = g_endpoint.state.pending_ui_count;
     g_rs_panel_dbg.pending_btn_count = g_endpoint.state.pending_btn_count;
     RsPanelDebug_Timer10ms(HAL_GetTick());
+    PanelLinkMonitor_Timer10ms();
     g_activity_accum_ms += 10u;
     if (g_activity_accum_ms >= 1000u) {
         g_activity_accum_ms = 0u;

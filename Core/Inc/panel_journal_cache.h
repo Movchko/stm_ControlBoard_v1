@@ -9,6 +9,15 @@
 extern "C" {
 #endif
 
+/**
+ * Буфер журнала: до WINDOW записей вокруг selected.
+ * У края (новейшая) — последние WINDOW шт.; в середине — selected ± MARGIN.
+ */
+#define PANEL_JOURNAL_MARGIN 5u
+#define PANEL_JOURNAL_WINDOW (1u + (2u * PANEL_JOURNAL_MARGIN)) /* 11 */
+/** Догрузка при листании / заполнении дыр (согласовано с ППКУ RS_V3_JOURNAL_BATCH). */
+#define PANEL_JOURNAL_PREFETCH_N 3u
+
 void PanelJournalCache_SetList(uint32_t total,
                                uint32_t selected_idx,
                                uint32_t window_first,
@@ -33,6 +42,19 @@ uint32_t PanelJournalCache_GetSelected(void);
 uint8_t PanelJournalCache_TakeDirty(void);
 
 bool PanelJournalCache_ReadRecord(uint32_t logical_index, EventLogRecord_t *out_record);
+
+/**
+ * SYS_READY 0→1: фоновая загрузка последних WINDOW событий (GET + GET_N×3).
+ * Open: сразу кэш (если есть), затем JOURNAL_GET newest — сверка total;
+ * при расхождении сброс окна и догрузка пула. Navigate — локально + GET_N×3.
+ */
+void PanelJournalCache_OnSysReady(void);
+void PanelJournalCache_Open(void);
+/** dir: 0=новее (UP), 1=старее (DOWN). Сразу двигает selected, если есть куда. */
+void PanelJournalCache_Navigate(uint8_t dir);
+void PanelJournalCache_JumpNewest(void);
+/** Вызывать из Drain / OnPoll / Timer — шлёт следующий RS-запрос, если слот свободен. */
+void PanelJournalCache_PrefetchProcess(void);
 
 #ifdef __cplusplus
 }

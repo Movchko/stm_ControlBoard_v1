@@ -31,14 +31,31 @@ void ScreenMenu_jurnalView::tearDownScreen()
 void ScreenMenu_jurnalView::renderCurrent()
 {
     EventLogUiLines_t lines;
-    if (hasValid == 0u || recordCount == 0u) {
+    if (recordCount == 0u) {
         EventLogUi_FormatEmpty(&lines);
+    } else if (hasValid == 0u) {
+        /* Запись ещё не в FIFO — не «ПУСТО», ждём GET_N. */
+        char hdr[48];
+        (void)snprintf(hdr, sizeof(hdr), "ЖУРНАЛ %lu/%lu",
+                       (unsigned long)(logicalIndex + 1u),
+                       (unsigned long)recordCount);
+        (void)memset(&lines, 0, sizeof(lines));
+        (void)strncpy(lines.header, hdr, sizeof(lines.header) - 1u);
+        (void)strncpy(lines.title, "...", sizeof(lines.title) - 1u);
+        (void)strncpy(lines.detail, "Загрузка", sizeof(lines.detail) - 1u);
     } else {
         EventLogRecord_t rec;
         EventLogRecStatus_t st = EVENT_LOG_REC_EMPTY;
         if (!EventLogReader_ReadLogical(EVENT_LOG_UI_TIER, logicalIndex, &st, &rec) ||
             st != EVENT_LOG_REC_VALID) {
-            EventLogUi_FormatEmpty(&lines);
+            char hdr[48];
+            (void)snprintf(hdr, sizeof(hdr), "ЖУРНАЛ %lu/%lu",
+                           (unsigned long)(logicalIndex + 1u),
+                           (unsigned long)recordCount);
+            (void)memset(&lines, 0, sizeof(lines));
+            (void)strncpy(lines.header, hdr, sizeof(lines.header) - 1u);
+            (void)strncpy(lines.title, "...", sizeof(lines.title) - 1u);
+            (void)strncpy(lines.detail, "Загрузка", sizeof(lines.detail) - 1u);
         } else {
             /* Позиция 1 = старейшая, count = новейшая. */
             uint32_t display_1based = logicalIndex + 1u;
@@ -103,24 +120,22 @@ bool ScreenMenu_jurnalView::stepValid(int direction)
 void ScreenMenu_jurnalView::refreshJournalUi()
 {
     recordCount = 0u;
-    logicalIndex = 0u;
     hasValid = 0u;
 
     EventLogTierInfo_t info;
     if (EventLogReader_GetTierInfo(EVENT_LOG_UI_TIER, &info) && info.count > 0u) {
         recordCount = info.count;
-        /* Показать выбранную на ППКУ (окно в кэше); иначе новейшую, если есть в окне. */
         uint32_t start = PanelJournalCache_GetSelected();
         if (start >= recordCount) {
             start = recordCount - 1u;
         }
+        /* Не откатываться на новейшую при промахе кэша — иначе «навигация не работает». */
         if (!loadLogical(start)) {
             logicalIndex = start;
             hasValid = 0u;
-            if (loadLogical(recordCount - 1u)) {
-                /* ok */
-            }
         }
+    } else {
+        logicalIndex = 0u;
     }
 
     renderCurrent();
@@ -128,7 +143,7 @@ void ScreenMenu_jurnalView::refreshJournalUi()
 
 void ScreenMenu_jurnalView::nextRecord()
 {
-    /* v3: листание через JOURNAL_GET (Drain), не локальный кэш. */
+    /* Листание делает PanelJournalCache_Navigate из Drain. */
 }
 
 void ScreenMenu_jurnalView::prevRecord()

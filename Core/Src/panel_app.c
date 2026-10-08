@@ -10,21 +10,14 @@
 
 #include "rs_panel_endpoint.h"
 
-#include "device_config.h"
-
+#include "panel_host_cache.h"
 #include "backend.h"
 #include "menu_ui.h"
 #include "main.h"
 
-
-
-extern PPKYCfg PPKYConfig;
-
-
-
 void PanelApp_Init(void) {
 
-	PPKYConfig.beep = 1u;
+	PanelHostCache_Init();
 
 	RtcCache_Refresh();
 

@@ -558,6 +558,150 @@
           }
         ],
         "Interactions": []
+      },
+      {
+        "Name": "TestSelectScreen",
+        "Components": [
+          {
+            "Type": "Box",
+            "Name": "box1",
+            "Width": 128,
+            "Height": 64
+          },
+          {
+            "Type": "TextArea",
+            "Name": "textAreatime_2",
+            "Y": 45,
+            "Width": 128,
+            "Height": 19,
+            "TextId": "__SingleUse_427A",
+            "TextRotation": "0",
+            "Color": {
+              "Red": 255,
+              "Green": 255,
+              "Blue": 255
+            },
+            "Wildcard1": {
+              "UseBuffer": true,
+              "BufferSize": 30
+            }
+          },
+          {
+            "Type": "ScrollableContainer",
+            "Name": "scrollableContainer1",
+            "Y": 17,
+            "Width": 128,
+            "Height": 28,
+            "HorizontalScrollEnabled": true,
+            "ScrollbarsAlpha": 255,
+            "Components": [
+              {
+                "Type": "ScrollWheel",
+                "Name": "scrollWheel1",
+                "Width": 128,
+                "Height": 28,
+                "IsCircular": true,
+                "ItemTemplateName": "mainmenu",
+                "NumberofItems": 3,
+                "Easing": "Back",
+                "EasingOption": "Out",
+                "SwipeAcceleration": 1.0,
+                "DragAcceleration": 1.0,
+                "OverShootPercentage": 75
+              }
+            ]
+          },
+          {
+            "Type": "Box",
+            "Name": "box1_white",
+            "Width": 128,
+            "Height": 64,
+            "Visible": false,
+            "Color": {
+              "Red": 255,
+              "Green": 255,
+              "Blue": 255
+            }
+          },
+          {
+            "Type": "Box",
+            "Name": "box1_black",
+            "Width": 128,
+            "Height": 64,
+            "Visible": false
+          }
+        ],
+        "Interactions": []
+      },
+      {
+        "Name": "TestScreen",
+        "Components": [
+          {
+            "Type": "Box",
+            "Name": "box1",
+            "Width": 128,
+            "Height": 64
+          },
+          {
+            "Type": "TextArea",
+            "Name": "textAreatime_2",
+            "Y": 45,
+            "Width": 128,
+            "Height": 19,
+            "TextId": "__SingleUse_GVZU",
+            "TextRotation": "0",
+            "Color": {
+              "Red": 255,
+              "Green": 255,
+              "Blue": 255
+            }
+          },
+          {
+            "Type": "ScrollableContainer",
+            "Name": "scrollableContainer1",
+            "Y": 17,
+            "Width": 128,
+            "Height": 28,
+            "HorizontalScrollEnabled": true,
+            "ScrollbarsAlpha": 255,
+            "Components": [
+              {
+                "Type": "ScrollWheel",
+                "Name": "scrollWheel1",
+                "Width": 128,
+                "Height": 28,
+                "IsCircular": true,
+                "ItemTemplateName": "mainmenu",
+                "NumberofItems": 6,
+                "Easing": "Back",
+                "EasingOption": "Out",
+                "SwipeAcceleration": 1.0,
+                "DragAcceleration": 1.0,
+                "OverShootPercentage": 75
+              }
+            ]
+          },
+          {
+            "Type": "Box",
+            "Name": "box1_white",
+            "Width": 128,
+            "Height": 64,
+            "Visible": false,
+            "Color": {
+              "Red": 255,
+              "Green": 255,
+              "Blue": 255
+            }
+          },
+          {
+            "Type": "Box",
+            "Name": "box1_black",
+            "Width": 128,
+            "Height": 64,
+            "Visible": false
+          }
+        ],
+        "Interactions": []
       }
     ],
     "CustomContainerDefinitions": [
@@ -796,7 +940,7 @@
     "SubFamily": "STM32H5x3",
     "Toolchain": "STM32CubeIDE",
     "Platform": "m33",
-    "ProjectFile": "../stm_PPKY.ioc",
+    "ProjectFile": "../stm_ControlBoard_v1.ioc",
     "OptionalComponentsRoot": "../Middlewares/ST/touchgfx_components",
     "OptionalComponents": [],
     "AdditionalFeatures": []

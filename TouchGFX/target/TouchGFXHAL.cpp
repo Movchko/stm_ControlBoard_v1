@@ -25,12 +25,10 @@
 /* USER CODE BEGIN TouchGFXHAL.cpp */
 #include "Display/display.h"
 #include "beeper.h"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include <gui/common/FrontendHeap.hpp>
 #include <touchgfx/hal/OSWrappers.hpp>
 using namespace touchgfx;
-
-extern PPKYCfg PPKYConfig;
 
 extern "C" void PanelApp_WireTouchGfx(void)
 {
@@ -38,7 +36,7 @@ extern "C" void PanelApp_WireTouchGfx(void)
 	Beeper_SetSoundStateUiCallback(+[](bool soundOn) {
 		FrontendHeap::getInstance().model.setSoundOn(soundOn);
 	});
-	PPKYConfig.beep = 1u;
+	PanelHostCache_Get()->beep = 1u;
 	Beeper_SoundOnOff(true);
 	FrontendHeap::getInstance().model.setSoundOn(true);
 }

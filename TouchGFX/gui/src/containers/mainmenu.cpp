@@ -122,5 +122,55 @@ void mainmenu::updateConnectionText(int16_t value)
 
 }
 
+void mainmenu::updateTestSelectText(int16_t value)
+{
+	switch (value) {
+	case 0:
+		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("ТЕСТ1"), textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
+		break;
+	case 1:
+		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("ТЕСТ2"), textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
+		break;
+	case 2:
+		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("ТЕСТ3"), textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
+		break;
+	default:
+		textAreaMainMenuBuffer[0] = 0;
+		break;
+	}
+	textAreaMainMenuBuffer[TEXTAREAMAINMENU_SIZE - 1] = 0;
+	textAreaMainMenu.invalidate();
+}
+
+void mainmenu::updateTestLampText(int16_t value)
+{
+	static const char* const kNames[] = {
+		"ПИТ",
+		"НОРМ",
+		"ПУСК",
+		"СТОП",
+		"НЕИСП",
+		"ПОЖАР",
+		"АВТО",
+		"П.ОБЩ К",
+		"ОСТ К",
+		"П.СП К",
+		"П.ОБЩ Т",
+		"ОСТ Т",
+		"П.СП Т",
+		"ВВОД",
+		"ОТМ"
+	};
+	const int16_t n = (int16_t)(sizeof(kNames) / sizeof(kNames[0]));
+	if (value < 0 || value >= n) {
+		textAreaMainMenuBuffer[0] = 0;
+	} else {
+		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(kNames[value]),
+		                  textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
+	}
+	textAreaMainMenuBuffer[TEXTAREAMAINMENU_SIZE - 1] = 0;
+	textAreaMainMenu.invalidate();
+}
+
 #endif
 

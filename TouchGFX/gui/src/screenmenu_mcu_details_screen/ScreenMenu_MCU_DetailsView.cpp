@@ -4,9 +4,7 @@
 #include <cstdio>
 
 #ifndef SIMULATOR
-#include "device_config.h"
-
-extern PPKYCfg PPKYConfig;
+#include "panel_host_cache.h"
 
 namespace {
 static bool isMcuType(uint8_t d_type)
@@ -70,10 +68,11 @@ void ScreenMenu_MCU_DetailsView::tearDownScreen()
 #ifndef SIMULATOR
 void ScreenMenu_MCU_DetailsView::refreshDeviceList()
 {
+    const PanelHostCache *host = PanelHostCache_GetConst();
     deviceCount = 0u;
     selectedIndex = 0u;
-    for (uint8_t i = 0u; i < 32u; i++) {
-        const Device* dev = &PPKYConfig.CfgDevices[i].UId.devId;
+    for (uint8_t i = 0u; i < MAX_MCU_IN_BUS; i++) {
+        const PanelHostDevice *dev = &host->devices[i];
         if (isMcuType(dev->d_type)) {
             deviceSlots[deviceCount++] = i;
         }
@@ -113,9 +112,9 @@ void ScreenMenu_MCU_DetailsView::renderSelected()
         return;
     }
 
+    const PanelHostCache *host = PanelHostCache_GetConst();
     uint8_t slot = deviceSlots[selectedIndex];
-    const MKUCfg* mku = &PPKYConfig.CfgDevices[slot];
-    const Device* dev = &mku->UId.devId;
+    const PanelHostDevice *dev = &host->devices[slot];
 
     char mcuLine[32];
     (void)std::snprintf(mcuLine, sizeof(mcuLine), "МКУ-%s %u",
@@ -129,7 +128,7 @@ void ScreenMenu_MCU_DetailsView::renderSelected()
     char zoneName[ZONE_NAME_SIZE + 1] = {0};
     uint8_t zone_idx = (dev->zone == 0u) ? 0u : (uint8_t)(dev->zone - 1u);
     if (zone_idx < ZONE_NUMBER) {
-        trimZoneName(zoneName, sizeof(zoneName), PPKYConfig.zone_name[zone_idx], ZONE_NAME_SIZE);
+        trimZoneName(zoneName, sizeof(zoneName), host->zone_name[zone_idx], ZONE_NAME_SIZE);
     }
     if (zoneName[0] == '\0') {
         (void)std::snprintf(zoneName, sizeof(zoneName), "Зона %u", (unsigned)dev->zone);
@@ -138,9 +137,9 @@ void ScreenMenu_MCU_DetailsView::renderSelected()
 
     char snLine[40];
     (void)std::snprintf(snLine, sizeof(snLine), "%08lX:%08lX:%08lX",
-                        (unsigned long)mku->UId.UId0,
-                        (unsigned long)mku->UId.UId1,
-                        (unsigned long)mku->UId.UId2);
+                        (unsigned long)dev->uid0,
+                        (unsigned long)dev->uid1,
+                        (unsigned long)dev->uid2);
     CustomContainerSrollText_SN.setText(snLine);
 }
 

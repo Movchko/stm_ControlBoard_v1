@@ -7,10 +7,12 @@
 #include "sound_profiles.h"
 #include "panel_ui_bridge.h"
 #include "panel_journal_cache.h"
+#include "panel_link_monitor.h"
 #include "rs_panel_endpoint.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
 #include "device_config.h"
+#include "panel_host_cache.h"
 #include "fire.h"
 #include "main.h"
 #include <string.h>
@@ -19,8 +21,6 @@
 #define RS_V3_HOLD_START_ALL_MS  3000u
 #define RS_V3_HOLD_FIRE_RESET_MS 5000u
 #define RS_V3_BLINK_HALF_MS      800u
-
-extern PPKYCfg PPKYConfig;
 
 static uint8_t s_sys_ready;
 static uint8_t s_fire_active;
@@ -156,6 +156,11 @@ uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
     return 1u;
 }
 
+uint8_t RsPanelV3Slave_IsEventPending(void)
+{
+    return (s_event.seq != 0u) ? 1u : 0u;
+}
+
 static void rs_v3_restore_start_all_idle_leds(void)
 {
     Led_SetBrightness(LED_BUT_START_ALL, LED_BUT_DIM_BRIGHTNESS);
@@ -232,13 +237,14 @@ static const char *rs_v3_ch_type_short(uint8_t v_d_type)
 
 static void rs_v3_format_ppku_sn(const RsPanelV3FaultEvtItem *fe, char *out, uint16_t out_sz)
 {
-    uint32_t u0 = PPKYConfig.UId.UId0;
-    uint32_t u1 = PPKYConfig.UId.UId1;
-    uint32_t u2 = PPKYConfig.UId.UId2;
+    const PanelHostCache *host = PanelHostCache_GetConst();
+    uint32_t u0 = host->host_uid0;
+    uint32_t u1 = host->host_uid1;
+    uint32_t u2 = host->host_uid2;
     if (out == 0 || out_sz == 0u) {
         return;
     }
-    /* UID с хоста в FAULT_EVT.mcu (локальный PPKYConfig на панели пустой). */
+    /* UID с хоста в FAULT_EVT.mcu (кэш host_uid* на панели обычно пуст). */
     if (fe != 0 && (fe->flags & RS_PANEL_V3_FAULT_FLAG_HAS_MCU) != 0u &&
         (fe->mcu.uid0 != 0u || fe->mcu.uid1 != 0u || fe->mcu.uid2 != 0u)) {
         u0 = fe->mcu.uid0;
@@ -392,6 +398,10 @@ static void rs_v3_push_faults_ui(void)
     char details[16][ZONE_NAME_SIZE + 1];
     uint8_t n;
     uint8_t i;
+    /* Локальная «НЕТ СВЯЗИ» важнее списка с хоста. */
+    if (PanelLinkMonitor_IsLost() != 0u) {
+        return;
+    }
     /* До SYS_READY на OLED только «ПРОВЕРКА» — не слать WARN (иначе АВАРИЯ+ПРОВЕРКА
      * при первом совместном старте ППКУ+панель, пока READY через ~20 с). */
     if (s_sys_ready == 0u) {
@@ -423,6 +433,9 @@ static void rs_v3_push_fault_placeholder_ui(void)
 {
     char titles[16][24];
     char details[16][ZONE_NAME_SIZE + 1];
+    if (PanelLinkMonitor_IsLost() != 0u) {
+        return;
+    }
     if (s_sys_ready == 0u) {
         s_fault_ui_dirty = 1u;
         s_fault_ui_dirty_ms = HAL_GetTick();
@@ -436,6 +449,9 @@ static void rs_v3_push_fault_placeholder_ui(void)
     (void)snprintf(titles[0], sizeof(titles[0]), "НЕИСПРАВНОСТЬ");
     s_fault_placeholder_active = 1u;
     RsPanelEndpoint_QueueWarningUi(1u, 1u, titles, details);
+    if (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u) {
+        RsPanelEndpoint_QueueGotoMain();
+    }
 }
 
 static void rs_v3_apply_zone_names(const RsPanelV3ZoneNameItem *zn)
@@ -518,8 +534,10 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
                                    SOUND_FAULT_DUTY_PULSES, SOUND_FAULT_DUTY_REPEAT_MS);
             Led_Set(LED_ERR, 1u);
             Led_ForceStatusBright(LED_ERR);
-            if (MenuUi_IsMainScreenActive() == 0u) {
-                MenuUi_SetMainScreenActive(1u);
+            /* Новая неисправность: с меню/теста на MAIN (deactivate → Led_ExitTestMode).
+             * Не ставить MainScreenActive=1 до GotoScreen — иначе переход пропустится. */
+            if (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u) {
+                RsPanelEndpoint_QueueGotoMain();
             }
         }
     } else if (fe->op == (uint8_t)RS_PANEL_V3_FAULT_EVT_CLEAR) {
@@ -628,6 +646,8 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
                 rs_v3_push_fault_placeholder_ui();
             }
             RsPanelEndpoint_QueueSysReadyNotify();
+            /* Фон: последние 11 событий журнала (GET + GET_N×3). */
+            PanelJournalCache_OnSysReady();
         }
         /* Сессия конфигурации закончилась — снять оверлей (иначе tick блочит UI). */
         if (prev_cfg != 0u && s_config_active == 0u && poll.has_config == 0u) {
@@ -688,6 +708,7 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
                 PanelJournalCache_SetList(total, selected, window_first, 0u, 0, 0u);
             }
         }
+        PanelJournalCache_PrefetchProcess();
     }
 
     if (poll.has_config != 0u) {
@@ -825,18 +846,15 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
         if (screen == RS_PANEL_SCREEN_MENU_JOURNAL ||
             screen == RS_PANEL_SCREEN_MENU_JOURNAL_DETAIL) {
             if (ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_NAV) {
-                /* p1: 0=UP=новее, 1=DOWN=старее — как v2 UI_EVT_NAV / master GET. */
-                (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_JOURNAL_GET, 0u,
-                                               (uint8_t)ue->p1, 0u, 0u);
+                /* Локальный FIFO: сразу selected, prefetch края по RS. */
+                PanelJournalCache_Navigate((uint8_t)ue->p1);
             } else if (ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_CONFIRM) {
-                /* u8_a=2: прыжок на новейшую (см. master DispatchDataEvent). */
-                (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_JOURNAL_GET, 0u, 2u, 0u, 0u);
+                PanelJournalCache_JumpNewest();
             }
         } else if (screen == RS_PANEL_SCREEN_MENU_ROOT &&
                    ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_MENU_SELECT) {
             if (ue->p1 == 3u) {
-                /* Сразу окно новейшей — COUNT больше не шлём (стирал кэш). */
-                (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_JOURNAL_GET, 0u, 2u, 0u, 0u);
+                PanelJournalCache_Open();
             } else if (ue->p1 == 4u) {
                 (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_DEVICES_COUNT, 0u, 0u, 0u, 0u);
             } else if (ue->p1 == 5u) {
@@ -849,7 +867,7 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
                 uint8_t on = (EspManager_IsUserWifiOn() != 0u) ? 0u : 1u;
                 (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_WIFI_SET, 0u, on, 0u, 0u);
             } else {
-                uint8_t on = (PPKYConfig.rs485_on != 0u) ? 0u : 1u;
+                uint8_t on = (PanelHostCache_GetConst()->rs485_on != 0u) ? 0u : 1u;
                 (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_EXT_CAN_SET, 0u, on, 0u, 0u);
             }
         } else if (screen == RS_PANEL_SCREEN_MENU_SOUND &&
@@ -883,6 +901,8 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
 
     ctx->pending_ui_count = 0u;
     ctx->pending_btn_count = 0u;
+
+    PanelJournalCache_PrefetchProcess();
 }
 
 static void rs_v3_sync_power_led(void)
@@ -917,7 +937,9 @@ static void rs_v3_sync_power_led(void)
 static void rs_v3_sync_status_leds(void)
 {
     uint8_t fire = s_fire_active;
-    uint8_t faults = (s_active_fault_count > 0u || s_has_faults != 0u) ? 1u : 0u;
+    uint8_t link_lost = PanelLinkMonitor_IsLost();
+    uint8_t faults = (s_active_fault_count > 0u || s_has_faults != 0u ||
+                      link_lost != 0u) ? 1u : 0u;
 
     rs_v3_sync_power_led();
 
@@ -947,6 +969,22 @@ static void rs_v3_sync_status_leds(void)
     }
 }
 
+void RsPanelV3Slave_RequestFaultUiRefresh(void)
+{
+    if (PanelLinkMonitor_IsLost() != 0u) {
+        return;
+    }
+    if (s_sys_ready == 0u) {
+        RsPanelEndpoint_QueueWarningUi(0u, 0u, 0, 0);
+        return;
+    }
+    if (s_active_fault_count > 0u || s_has_faults == 0u) {
+        rs_v3_push_faults_ui();
+    } else {
+        rs_v3_push_fault_placeholder_ui();
+    }
+}
+
 void RsPanelV3Slave_Timer10ms(void)
 {
     uint32_t now = HAL_GetTick();
@@ -954,6 +992,7 @@ void RsPanelV3Slave_Timer10ms(void)
 
     RsPanelV3Slave_OnButtonSample();
     rs_v3_sync_status_leds();
+    PanelJournalCache_PrefetchProcess();
 
     /* Пакет FAULT_SET — один push после паузы; только после SYS_READY. */
     if (s_sys_ready != 0u && s_fault_ui_dirty != 0u &&

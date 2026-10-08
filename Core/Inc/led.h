@@ -9,21 +9,21 @@
 #define INC_LED_H_
 
 
-#define LED_POWER 		0 // в этой версии нет
-#define LED_NORM		1 // в этой версии нет
-#define LED_START		2 // в этой версии нет
-#define LED_STOP		3 // в этой версии нет
-#define LED_ERR			4 // в этой версии нет
+#define LED_POWER 		0
+#define LED_NORM		1
+#define LED_START		2
+#define LED_STOP		3
+#define LED_ERR			4
 #define LED_FIRE		5
 #define LED_AUTO_OFF	6
 
-#define LED_BUT_START_ALL	7 // в этой версии нет
+#define LED_BUT_START_ALL	7
 #define LED_BUT_STOP		8
 #define LED_BUT_START_SP	9
 #define LED_BUT_ENTER_UP	13
 #define LED_BUT_ESC_DW		14
 
-#define LED_STR_START_ALL	10 // в этой версии нет
+#define LED_STR_START_ALL	10
 #define LED_STR_STOP		11
 #define LED_STR_START_SP	12
 
@@ -59,6 +59,18 @@ void Led_TestToogle();
 void Led_Process();
 void Led_SetBrightness(uint8_t led, uint8_t power);
 void Led_ForceStatusBright(uint8_t led);
+
+/**
+ * ТЕСТ2: захват LED — блокирует Led_Set/яркость от ППКУ и внутренней логики,
+ * сохраняет снимок, гасит все каналы, выставляет макс. яркость.
+ * Выход восстанавливает снимок.
+ */
+void Led_EnterTestMode(void);
+void Led_ExitTestMode(void);
+uint8_t Led_IsTestMode(void);
+/** Управление LED только из UI теста (обходит блокировку). */
+void Led_TestSet(uint8_t led, uint8_t st);
+uint8_t Led_TestGet(uint8_t led);
 
 #ifdef __cplusplus
 }

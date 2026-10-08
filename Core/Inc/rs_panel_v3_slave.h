@@ -29,12 +29,16 @@ uint8_t RsPanelV3Slave_GetHoldRemainingSec(void);
 /* Поставить событие в слот (0 = занято/отказ). */
 uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
                                  uint16_t u16_a, uint16_t u16_b);
+/** 1 = слот события занят (ждём ACK). */
+uint8_t RsPanelV3Slave_IsEventPending(void);
 
 /* Локальный hold ПУСК ОБЩИЙ / ОСТАНОВ (фаза 2). */
 void RsPanelV3Slave_OnButtonSample(void);
 
 void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx);
 uint8_t RsPanelV3Slave_IsV3Active(void);
+/** После восстановления связи с ППКУ — снова отдать текущий список неисправностей. */
+void RsPanelV3Slave_RequestFaultUiRefresh(void);
 
 #ifdef __cplusplus
 }

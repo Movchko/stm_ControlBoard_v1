@@ -26,6 +26,10 @@
 #include <gui/screen_logo_screen/screen_logoPresenter.hpp>
 #include <gui/screenblockzone_screen/ScreenBlockZoneView.hpp>
 #include <gui/screenblockzone_screen/ScreenBlockZonePresenter.hpp>
+#include <gui/testselectscreen_screen/TestSelectScreenView.hpp>
+#include <gui/testselectscreen_screen/TestSelectScreenPresenter.hpp>
+#include <gui/testscreen_screen/TestScreenView.hpp>
+#include <gui/testscreen_screen/TestScreenPresenter.hpp>
 
 using namespace touchgfx;
 

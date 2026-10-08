@@ -5,12 +5,10 @@
 
 #ifndef SIMULATOR
 #include "button.h"
-#include "device_config.h"
 #include "config_ign_block_sync.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_protocol.h"
 
-extern PPKYCfg PPKYConfig;
 extern void SaveConfig(void);
 #endif
 

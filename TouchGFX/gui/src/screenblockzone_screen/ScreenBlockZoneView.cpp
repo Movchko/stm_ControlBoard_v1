@@ -3,11 +3,9 @@
 #include <cstring>
 
 #ifndef SIMULATOR
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "config_zone_block.h"
 #include "menu_ui.h"
-
-extern PPKYCfg PPKYConfig;
 #endif
 
 ScreenBlockZoneView::ScreenBlockZoneView()
@@ -67,8 +65,9 @@ static const char *zoneModeStatusText(uint8_t mode)
 void ScreenBlockZoneView::refreshZoneUi()
 {
     activeZoneCount_ = 0u;
+    const PanelHostCache *host = PanelHostCache_GetConst();
     for (uint8_t zi = 0u; zi < ZONE_NUMBER; zi++) {
-        if (PPKYConfig.zone_name[zi][0] == 0) {
+        if (host->zone_name[zi][0] == 0) {
             continue;
         }
         if (activeZoneCount_ < MAX_ACTIVE_ZONES) {
@@ -104,7 +103,7 @@ void ScreenBlockZoneView::refreshZoneUi()
 
     const uint8_t zone_idx = activeZoneIdx_[selectedPos_];
     char zone_name[ZONE_NAME_SIZE + 1];
-    trimZoneName(zone_name, sizeof(zone_name), PPKYConfig.zone_name[zone_idx]);
+    trimZoneName(zone_name, sizeof(zone_name), host->zone_name[zone_idx]);
     CustomContainerSrollText.setText(zone_name);
 
     const uint8_t mode = PPKY_ZoneFireModeGet(zone_idx);

@@ -3,11 +3,8 @@
 #include <cstdio>
 
 #ifndef SIMULATOR
-#include "app.hpp"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "menu_ui.h"
-
-extern PPKYCfg PPKYConfig;
 
 namespace {
 static bool isMcuType(uint8_t d_type)
@@ -76,15 +73,16 @@ void screen_devicesView::renderSelected()
         return;
     }
 
+    const PanelHostCache *host = PanelHostCache_GetConst();
     uint8_t currSlot = deviceSlots[selectedIndex];
     uint8_t nextSlot = deviceSlots[(uint8_t)((selectedIndex + 1u) % deviceCount)];
-    const Device* curr = &PPKYConfig.CfgDevices[currSlot].UId.devId;
-    const Device* next = &PPKYConfig.CfgDevices[nextSlot].UId.devId;
+    const PanelHostDevice *curr = &host->devices[currSlot];
+    const PanelHostDevice *next = &host->devices[nextSlot];
 
     char zoneName[ZONE_NAME_SIZE + 1] = {0};
     uint8_t zone_idx = (curr->zone == 0u) ? 0u : (uint8_t)(curr->zone - 1u);
     if (zone_idx < ZONE_NUMBER) {
-        trimZoneName(zoneName, sizeof(zoneName), PPKYConfig.zone_name[zone_idx], ZONE_NAME_SIZE);
+        trimZoneName(zoneName, sizeof(zoneName), host->zone_name[zone_idx], ZONE_NAME_SIZE);
     }
     if (zoneName[0] == '\0') {
         (void)std::snprintf(zoneName, sizeof(zoneName), "Зона %u", (unsigned)curr->zone);
@@ -108,10 +106,11 @@ void screen_devicesView::renderSelected()
 
 void screen_devicesView::refreshDeviceUi()
 {
+    const PanelHostCache *host = PanelHostCache_GetConst();
     deviceCount = 0u;
     selectedIndex = 0u;
-    for (uint8_t i = 0u; i < 32u; i++) {
-        const Device* dev = &PPKYConfig.CfgDevices[i].UId.devId;
+    for (uint8_t i = 0u; i < MAX_MCU_IN_BUS; i++) {
+        const PanelHostDevice *dev = &host->devices[i];
         if (isMcuType(dev->d_type)) {
             deviceSlots[deviceCount++] = i;
         }

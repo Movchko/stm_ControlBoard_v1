@@ -9,7 +9,7 @@
 #include "main.h"
 #include "menu_ui.h"
 #include "gost_mode.h"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "event_log.h"
 #include "sound_profiles.h"
 #include "fire.h"
@@ -818,17 +818,17 @@ void Beeper_SetSoundStateUiCallback(Beeper_SoundStateUiCallback cb)
 void Beeper_ResumeSoundOnNewEvent(void)
 {
 #if GOST_MODE
-	extern PPKYCfg PPKYConfig;
+	PanelHostCache *host = PanelHostCache_Get();
 
 	/* ГОСТ 7.6.1.13: после ручного отключения звука новое извещение снова включает звук. */
 	if (beep_sound != 0u) {
 		return;
 	}
-	if (PPKYConfig.beep_block != 0u) {
+	if (host->beep_block != 0u) {
 		return;
 	}
 	beep_sound = 1u;
-	PPKYConfig.beep = 1u;
+	host->beep = 1u;
 	if (g_sound_state_ui_cb != 0) {
 		g_sound_state_ui_cb(true);
 	}

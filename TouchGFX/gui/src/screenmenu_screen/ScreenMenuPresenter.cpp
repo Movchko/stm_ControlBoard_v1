@@ -6,10 +6,8 @@
 #include "rs_panel_protocol.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_v3_slave.h"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "event_log.h"
-
-extern PPKYCfg PPKYConfig;
 
 ScreenMenuPresenter::ScreenMenuPresenter(ScreenMenuView& v)
     : view(v)
@@ -99,7 +97,7 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
         if (action == 0) {
             uint8_t mode = (uint8_t)((MenuUi_GetFireModeValue() + 1u) % 3u);
             MenuUi_SetFireModeValue(mode);
-            PPKYConfig.fire_mode = mode;
+            PanelHostCache_Get()->fire_mode = mode;
             EventLog_LogFireModeChange(mode, 0u);
             refreshLine();
             return;
@@ -110,7 +108,7 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
                 return;
             }
             soundOn = !soundOn;
-            PPKYConfig.beep = soundOn ? 1u : 0u;
+            PanelHostCache_Get()->beep = soundOn ? 1u : 0u;
             MenuUi_SetSoundValue(soundOn ? 1u : 0u, MenuUi_IsSoundBlocked());
             EventLog_LogSoundToggle(soundOn ? 1u : 0u, 0u);
             /* SOUND_SET на хост: panel_state → Drain при MENU_SOUND; здесь только UI.
@@ -143,7 +141,7 @@ void ScreenMenuPresenter::handleButton(uint8_t but, uint8_t state)
             return;
         }
         if (action == 6) {
-            view.startIndicationTest();
+            PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MENU_TEST_SELECT, RS_PANEL_UI_ACTION_REPLACE);
             return;
         }
     }

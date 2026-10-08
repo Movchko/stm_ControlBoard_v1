@@ -118,6 +118,16 @@ static uint8_t panel_state_is_remote_connection_button(uint16_t screen, uint8_t 
     return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
 }
 
+/* Локальные экраны теста: ESC/UP/DOWN/ENTER не уходят на хост. */
+static uint8_t panel_state_is_local_test_nav_button(uint16_t screen, uint8_t btn)
+{
+    if (screen != RS_PANEL_SCREEN_MENU_TEST_SELECT &&
+        screen != RS_PANEL_SCREEN_MENU_TEST_LAMPS) {
+        return 0u;
+    }
+    return (btn == BUT_ESC || btn == BUT_UP || btn == BUT_DOWN || btn == BUT_ENTER) ? 1u : 0u;
+}
+
 /* Маршрут кнопок: сначала реальный TouchGFX menu-session, потом RS current_screen.
  * НИКОГДА не подменяем MAIN/LOGO на MENU_ROOT: иначе UP на главном уходит как UI_NAV
  * меню, мастер тихо ставит MENU_ROOT без UI_NAV на панель → рассинхрон. */
@@ -142,6 +152,8 @@ static uint16_t panel_state_route_screen(uint16_t screen)
     case RS_PANEL_SCREEN_MENU_BLOCK_ZONE:
     case RS_PANEL_SCREEN_MENU_SETTINGS:
     case RS_PANEL_SCREEN_MENU_SOUND:
+    case RS_PANEL_SCREEN_MENU_TEST_SELECT:
+    case RS_PANEL_SCREEN_MENU_TEST_LAMPS:
     case RS_PANEL_SCREEN_MENU_ROOT:
     case RS_PANEL_SCREEN_MAIN:
     case RS_PANEL_SCREEN_LOGO:
@@ -546,6 +558,7 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
             uint8_t route_device_ui = panel_state_is_remote_device_button(screen, btn);
             uint8_t route_block_zone_ui = panel_state_is_remote_block_zone_button(screen, btn);
             uint8_t route_connection_ui = panel_state_is_remote_connection_button(screen, btn);
+            uint8_t local_test_nav = panel_state_is_local_test_nav_button(screen, btn);
             if (state == (uint8_t)ButtonStatePress) {
                 const uint8_t on_main_screen = (MenuUi_IsMainScreenActive() != 0u);
                 const uint8_t fire_blocks_menu =
@@ -556,7 +569,9 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
                     (on_main_screen != 0u && btn == BUT_ENTER && fire_blocks_menu == 0u);
                 const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(screen, btn);
 
-                if (is_main_enter != 0u) {
+                if (local_test_nav != 0u) {
+                    /* Только TouchGFX presenter — без UI_EVT/btn на хост. */
+                } else if (is_main_enter != 0u) {
                     panel_state_push_ui(ctx, RS_PANEL_UI_EVT_CONFIRM, 0u, 0u);
                 } else if (route_to_ui != 0u) {
                     panel_state_push_journal_ui_event(ctx, btn);
@@ -573,7 +588,7 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
                 } else {
                     panel_state_push_btn(ctx, type, state, level);
                 }
-            } else {
+            } else if (local_test_nav == 0u) {
                 panel_state_push_btn(ctx, type, state, level);
             }
         }

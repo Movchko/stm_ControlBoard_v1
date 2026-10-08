@@ -34,6 +34,8 @@ void RsPanelEndpoint_QueueWarningUi(uint8_t active,
                                     char (*details)[ZONE_NAME_SIZE + 1]);
 /** Очередь SYS_READY 0→1 → снять «ПРОВЕРКА» в TouchGFX tick (после WARN). */
 void RsPanelEndpoint_QueueSysReadyNotify(void);
+/** Отложенный переход на MAIN (из Timer10ms — не из UART IRQ). */
+void RsPanelEndpoint_QueueGotoMain(void);
 
 #ifdef __cplusplus
 }

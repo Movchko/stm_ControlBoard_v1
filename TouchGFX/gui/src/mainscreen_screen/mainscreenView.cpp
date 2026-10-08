@@ -5,7 +5,7 @@
 
 #ifndef SIMULATOR
 #include "main.h"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "config_zone_block.h"
 #include "gost_mode.h"
 #include "button.h"
@@ -15,8 +15,7 @@
 #include "tick_time.h"
 #include "esp_manager.h"
 #include "rs_panel_v3_slave.h"
-
-extern PPKYCfg PPKYConfig;
+#include "panel_link_monitor.h"
 
 namespace {
 
@@ -266,7 +265,8 @@ static void ui_refresh_mode_list(void)
 		const uint8_t pos = s_mn_n++;
 		s_mn_zones[pos] = zi;
 		s_mn_modes[pos] = mode;
-		trim_zone_name(s_mn_names[pos], sizeof(s_mn_names[pos]), PPKYConfig.zone_name[zi]);
+		trim_zone_name(s_mn_names[pos], sizeof(s_mn_names[pos]),
+			       PanelHostCache_GetConst()->zone_name[zi]);
 	}
 	if (s_mn_n == 0u) {
 		s_cur[BANNER_MODE] = 0u;
@@ -349,16 +349,18 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 		return;
 	}
 #ifndef SIMULATOR
-	/* Пока нет SYS_READY от ППКУ (в т.ч. нет связи) — «ПРОВЕРКА».
-	 * setupScreen тоже рисует «ПРОВЕРКА» с BANNER_NONE; без force
-	 * тик выходит по desired==s_banner_mode и текст зависает. */
+	/* Пока нет SYS_READY от ППКУ — «ПРОВЕРКА», кроме локальной «НЕТ СВЯЗИ». */
 	const uint8_t sys_ready = RsPanelV3Slave_IsSysReady();
-	if (sys_ready == 0u) {
+	if (sys_ready == 0u && PanelLinkMonitor_IsLost() == 0u) {
 		view->uiShowConfigOverlay("ПРОВЕРКА");
 		s_showing_proverka = 1u;
 		s_banner_mode = BANNER_NONE;
 		s_last_sys_ready = 0u;
 		return;
+	}
+	if (sys_ready == 0u && PanelLinkMonitor_IsLost() != 0u) {
+		/* Связи нет — показать WARN «НЕТ СВЯЗИ», не залипать в «ПРОВЕРКА». */
+		force = true;
 	}
 	/* Пока центр ещё «ПРОВЕРКА» — всегда force. Флаги снимаем только после
 	 * реальной отрисовки НОРМА/аварии (иначе early-return + шапка АВАРИЯ). */
@@ -370,12 +372,8 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 	/* Таймер ПУСК ОБЩИЙ важнее НОРМА / прочих баннеров. */
 	if (ui_is_start_all_hold()) {
 		const uint8_t rem = RsPanelV3Slave_GetHoldRemainingSec();
-		if (rem > 0u) {
-			(void)std::snprintf(s_fire_center_text, sizeof(s_fire_center_text),
-					    "%uСЕК.", (unsigned)rem);
-		} else {
-			(void)std::snprintf(s_fire_center_text, sizeof(s_fire_center_text), "3СЕК.");
-		}
+		(void)std::snprintf(s_fire_center_text, sizeof(s_fire_center_text),
+				    "%uСЕК.", (unsigned)rem);
 		s_start_all_hold_shown = 1u;
 		view->uiShowStartAllHoldTimer(s_fire_center_text);
 		s_banner_mode = BANNER_NONE;
@@ -415,7 +413,7 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 		if (desired == BANNER_FAULT && s_wn_n == 0u &&
 		    RsPanelV3Slave_HasFaults() != 0u) {
 			s_wn_n = 1u;
-			std::strncpy(s_wn_titles[0], "НЕИСПРАВНОСТЬ", WARNING_TITLE_LEN - 1u);
+			std::strncpy(s_wn_titles[0], "НЕИСПР.", WARNING_TITLE_LEN - 1u);
 			s_wn_titles[0][WARNING_TITLE_LEN - 1u] = '\0';
 			s_wn_details[0][0] = '\0';
 			s_cur[BANNER_FAULT] = 0u;
@@ -499,7 +497,7 @@ void mainscreenView::setupScreen()
 	textAreatime_top_bar.setPosition(0, 0, 128, 15);
 	Fire_UiSetManualSelection(0u, 0u);
 	ui_refresh_mode_list();
-	if (RsPanelV3Slave_IsSysReady() == 0u) {
+	if (RsPanelV3Slave_IsSysReady() == 0u && PanelLinkMonitor_IsLost() == 0u) {
 		uiShowConfigOverlay("ПРОВЕРКА");
 		s_showing_proverka = 1u;
 		s_last_sys_ready = 0u;
@@ -905,7 +903,7 @@ void mainscreenView::uiSetWarningHeaderVisible(bool visible)
 #ifndef SIMULATOR
 	if (!visible) {
 		/* Вернуть mute/wifi после ухода с заголовка. */
-		applyMuteIcon(PPKYConfig.beep != 0u);
+		applyMuteIcon(PanelHostCache_GetConst()->beep != 0u);
 		applyWifiIcon(EspManager_IsWifiIconVisible(HAL_GetTick()) != 0u);
 	} else {
 		customContainerTopBar1.setWifiVisible(false);
@@ -992,7 +990,7 @@ void mainscreenView::uiShowStartAllHoldTimer(const char* center_text)
 	ui_set_warning_header_visible(this, true);
 	uiSetTopHeaderText("ДО ПУСКА");
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
-	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "3СЕК.";
+	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "0СЕК.";
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(txt), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 	textArea1.setWildcard(textArea1Buffer);
@@ -1256,7 +1254,8 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 			need_force = true;
 		} else if (s_cur[BANNER_FAULT] != prev_cur) {
 			need_force = true;
-		} else if (RsPanelV3Slave_IsSysReady() != 0u &&
+		} else if ((RsPanelV3Slave_IsSysReady() != 0u ||
+			            PanelLinkMonitor_IsLost() != 0u) &&
 			   s_showing_proverka == 0u &&
 			   s_config_overlay_text[0] == '\0' &&
 			   s_banner_mode == BANNER_FAULT && s_wn_n > 0u) {

@@ -3,12 +3,11 @@
 #include "button.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
-#include "device_config.h"
+#include "panel_host_cache.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_protocol.h"
 #include "rs_panel_v3_slave.h"
 
-extern PPKYCfg PPKYConfig;
 
 ScreenMenu_ConnectionPresenter::ScreenMenu_ConnectionPresenter(ScreenMenu_ConnectionView& v)
     : view(v)
@@ -38,7 +37,8 @@ void ScreenMenu_ConnectionPresenter::deactivate()
 void ScreenMenu_ConnectionPresenter::refreshLine()
 {
     view.updateStatusLine(currentIndex, MenuUi_IsWifiBlocked() != 0u,
-                          EspManager_IsUserWifiOn() != 0u, PPKYConfig.rs485_on != 0u);
+                          EspManager_IsUserWifiOn() != 0u,
+                          PanelHostCache_GetConst()->rs485_on != 0u);
 }
 
 void ScreenMenu_ConnectionPresenter::handleButton(uint8_t but, uint8_t state)
@@ -85,9 +85,9 @@ void ScreenMenu_ConnectionPresenter::handleButton(uint8_t but, uint8_t state)
                     return;
                 }
                 uint8_t on = (EspManager_IsUserWifiOn() != 0u) ? 0u : 1u;
-                PanelConnectionCache_SetRemoteStatus(on, PPKYConfig.rs485_on);
+                PanelConnectionCache_SetRemoteStatus(on, PanelHostCache_GetConst()->rs485_on);
             } else {
-                uint8_t on = (PPKYConfig.rs485_on != 0u) ? 0u : 1u;
+                uint8_t on = (PanelHostCache_GetConst()->rs485_on != 0u) ? 0u : 1u;
                 PanelConnectionCache_SetRemoteStatus(EspManager_IsUserWifiOn(), on);
             }
         }

@@ -8,13 +8,14 @@
 #include "event_log_reader.h"
 #include "device_config.h"
 #include "panel_cfg.h"
+#include "panel_host_cache.h"
+#include "panel_journal_cache.h"
 #include "panel_state.h"
 #include "rs_panel_v3_slave.h"
+#include "rs_panel_protocol_v3.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
-
-PPKYCfg PPKYConfig;
 
 /* ---------------- UI-driven fire state (RS v2 -> panel UI) ----------------
  * На панели логика пожара отсутствует, но TouchGFX/FrontendApplication
@@ -60,7 +61,7 @@ void Fire_NotifyUiStatus(uint8_t ui_active, uint8_t mode, uint8_t remaining_s, u
 }
 
 /* Локальный конфиг панели (DevicePanelConfig) — Flash сектор CFG.
- * PPKYConfig в RAM — кэш UI от ППКУ, во Flash панели не пишется. */
+ * Кэш хоста (PanelHostCache) — только RAM для UI, во Flash не пишется. */
 void SaveConfig(void)
 {
 	PanelCfg_Save();
@@ -221,7 +222,7 @@ void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_
 void PanelConnectionCache_SetRemoteStatus(uint8_t user_wifi_on, uint8_t rs485_on)
 {
     s_user_wifi_on = (user_wifi_on != 0u) ? 1u : 0u;
-    PPKYConfig.rs485_on = (rs485_on != 0u) ? 1u : 0u;
+    PanelHostCache_Get()->rs485_on = (rs485_on != 0u) ? 1u : 0u;
 }
 void MenuUi_SetMcuDetailSlot(uint8_t cfg_slot) { s_mcu_slot = cfg_slot; }
 uint8_t MenuUi_GetMcuDetailSlot(void) { return s_mcu_slot; }
@@ -286,7 +287,7 @@ uint8_t PPKY_ZoneFireModeGet(uint8_t zone_idx)
 	if (zone_idx >= ZONE_NUMBER) {
 		return 0u;
 	}
-	return PPKYConfig.zone_fire_mode[zone_idx];
+	return PanelHostCache_GetConst()->zone_fire_mode[zone_idx];
 }
 
 void PPKY_ZoneFireModeSet(uint8_t zone_idx, uint8_t mode)
@@ -294,7 +295,7 @@ void PPKY_ZoneFireModeSet(uint8_t zone_idx, uint8_t mode)
 	if (zone_idx >= ZONE_NUMBER) {
 		return;
 	}
-	PPKYConfig.zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
+	PanelHostCache_Get()->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
 }
 
 uint8_t PPKY_ZoneEffectiveMode(uint8_t zone_can)
@@ -319,8 +320,9 @@ uint8_t PPKY_ZoneIsManualByCanZone(uint8_t zone_can)
 
 uint8_t PPKY_AnyZoneManualOrBlocked(void)
 {
+	const PanelHostCache *host = PanelHostCache_GetConst();
 	for (uint8_t i = 0u; i < ZONE_NUMBER; i++) {
-		const uint8_t m = PPKYConfig.zone_fire_mode[i];
+		const uint8_t m = host->zone_fire_mode[i];
 		if (m == 2u || m == 3u) {
 			return 1u;
 		}
@@ -357,22 +359,246 @@ void EventLog_LogFireModeChange(uint8_t mode, uint8_t source) { (void)mode; (voi
 
 /* ---------------- ЖУРНАЛ ПО RS (экран «Журнал») ---------------- */
 
-#define PANEL_JOURNAL_MAX_ITEMS 64u
-
 typedef struct {
 	uint32_t rec_idx;
 	uint32_t ts;
 	uint16_t code;
+	uint8_t valid;
 	char header[EVENT_LOG_UI_HEADER_LEN];
 	char title[EVENT_LOG_UI_TITLE_LEN];
 	char detail[EVENT_LOG_UI_DETAIL_LEN];
 } PanelJournalEntry_t;
 
-static PanelJournalEntry_t g_journal_entries[PANEL_JOURNAL_MAX_ITEMS];
-static uint32_t g_journal_window_count; /* сколько записей в окне */
-static uint32_t g_journal_total;        /* всего на ППКУ */
-static uint32_t g_journal_selected;     /* logical index выбранной */
+static PanelJournalEntry_t g_journal_entries[PANEL_JOURNAL_WINDOW];
+static uint8_t g_journal_window_count;
+static uint32_t g_journal_total;
+static uint32_t g_journal_selected;
 static volatile uint8_t g_journal_dirty;
+/* Старт: GET u8_a=2 (новейшая + total в payload). Не COUNT — меньше гонок. */
+static uint8_t g_journal_want_newest;
+static uint8_t g_journal_open_pending; /* применить selected из первого reply */
+/* Open: сверка total с хостом; при расхождении — сброс окна. */
+static uint8_t g_journal_open_refresh;
+#define JOURNAL_NO_INFLIGHT 0xFFFFFFFFu
+static uint32_t g_journal_inflight = JOURNAL_NO_INFLIGHT;
+
+static uint32_t journal_abs_diff(uint32_t a, uint32_t b)
+{
+	return (a >= b) ? (a - b) : (b - a);
+}
+
+/**
+ * Окно на PANEL_JOURNAL_WINDOW записей, центрированное на selected и
+ * прижатое к краям: у новейшей — последние 11, у старейшей — первые 11.
+ */
+static void journal_window_range(uint32_t *first_out, uint32_t *last_out)
+{
+	uint32_t first;
+	uint32_t last;
+	uint32_t win = (uint32_t)PANEL_JOURNAL_WINDOW;
+
+	if (first_out == 0 || last_out == 0) {
+		return;
+	}
+	if (g_journal_total == 0u) {
+		*first_out = 0u;
+		*last_out = 0u;
+		return;
+	}
+	if (g_journal_selected >= g_journal_total) {
+		g_journal_selected = g_journal_total - 1u;
+	}
+	if (g_journal_total <= win) {
+		*first_out = 0u;
+		*last_out = g_journal_total - 1u;
+		return;
+	}
+	/* Центр: selected − MARGIN .. selected + MARGIN, затем clamp к [0, total). */
+	if (g_journal_selected < PANEL_JOURNAL_MARGIN) {
+		first = 0u;
+	} else {
+		first = g_journal_selected - PANEL_JOURNAL_MARGIN;
+	}
+	last = first + win - 1u;
+	if (last >= g_journal_total) {
+		last = g_journal_total - 1u;
+		first = last + 1u - win;
+	}
+	*first_out = first;
+	*last_out = last;
+}
+
+static int journal_find_slot(uint32_t rec_idx)
+{
+	uint8_t i;
+	for (i = 0u; i < g_journal_window_count; i++) {
+		if (g_journal_entries[i].valid != 0u &&
+		    g_journal_entries[i].rec_idx == rec_idx) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+static void journal_remove_slot(uint8_t slot)
+{
+	if (slot >= g_journal_window_count) {
+		return;
+	}
+	if ((uint8_t)(slot + 1u) < g_journal_window_count) {
+		memmove(&g_journal_entries[slot],
+			&g_journal_entries[slot + 1u],
+			(size_t)(g_journal_window_count - slot - 1u) * sizeof(g_journal_entries[0]));
+	}
+	g_journal_window_count--;
+	memset(&g_journal_entries[g_journal_window_count], 0, sizeof(g_journal_entries[0]));
+}
+
+/** Выкинуть записи вне ±MARGIN; если всё внутри — самую дальнюю от selected. */
+static void journal_evict_one(void)
+{
+	uint8_t i;
+	uint8_t worst = 0u;
+	uint32_t worst_d = 0u;
+	uint32_t first;
+	uint32_t last;
+
+	if (g_journal_window_count == 0u) {
+		return;
+	}
+	journal_window_range(&first, &last);
+	for (i = 0u; i < g_journal_window_count; i++) {
+		uint32_t idx = g_journal_entries[i].rec_idx;
+		if (idx < first || idx > last) {
+			journal_remove_slot(i);
+			return;
+		}
+	}
+	for (i = 0u; i < g_journal_window_count; i++) {
+		uint32_t d = journal_abs_diff(g_journal_entries[i].rec_idx, g_journal_selected);
+		if (d > worst_d ||
+		    (d == worst_d &&
+		     g_journal_entries[i].rec_idx != g_journal_selected)) {
+			worst_d = d;
+			worst = i;
+		}
+	}
+	journal_remove_slot(worst);
+}
+
+/** После Navigate — освободить слоты под новый запас. */
+static void journal_trim_outside_window(void)
+{
+	uint32_t first;
+	uint32_t last;
+	uint8_t i;
+
+	if (g_journal_total == 0u) {
+		return;
+	}
+	journal_window_range(&first, &last);
+	i = 0u;
+	while (i < g_journal_window_count) {
+		uint32_t idx = g_journal_entries[i].rec_idx;
+		if (idx < first || idx > last) {
+			journal_remove_slot(i);
+			continue;
+		}
+		i++;
+	}
+}
+
+static void journal_store_entry(const PanelJournalEntry_t *src)
+{
+	int slot;
+	uint32_t first;
+	uint32_t last;
+
+	if (src == 0) {
+		return;
+	}
+	/* Не копить мусор вне текущего окна. */
+	if (g_journal_total > 0u) {
+		journal_window_range(&first, &last);
+		if (src->rec_idx < first || src->rec_idx > last) {
+			return;
+		}
+	}
+	slot = journal_find_slot(src->rec_idx);
+	if (slot >= 0) {
+		g_journal_entries[slot] = *src;
+		g_journal_entries[slot].valid = 1u;
+		return;
+	}
+	while (g_journal_window_count >= PANEL_JOURNAL_WINDOW) {
+		journal_evict_one();
+	}
+	g_journal_entries[g_journal_window_count] = *src;
+	g_journal_entries[g_journal_window_count].valid = 1u;
+	g_journal_window_count++;
+}
+
+static uint8_t journal_has(uint32_t rec_idx)
+{
+	return (journal_find_slot(rec_idx) >= 0) ? 1u : 0u;
+}
+
+/**
+ * Ближайшая дыра к selected. Старт GET_N сдвигаем назад не больше чем на
+ * (PREFETCH_N−1), чтобы ответ из 3 записей обязательно покрыл эту дыру
+ * (иначе selected «Загрузка», а RS качает дальний край окна).
+ */
+static uint8_t journal_pick_missing(uint32_t *out_idx)
+{
+	uint32_t first;
+	uint32_t last;
+	uint32_t d;
+	uint32_t miss;
+	uint32_t start;
+	uint8_t found = 0u;
+
+	if (out_idx == 0 || g_journal_total == 0u) {
+		return 0u;
+	}
+	journal_window_range(&first, &last);
+
+	if (journal_has(g_journal_selected) == 0u) {
+		miss = g_journal_selected;
+		found = 1u;
+	} else {
+		uint32_t span = last - first;
+		for (d = 1u; d <= span; d++) {
+			if (g_journal_selected >= d) {
+				uint32_t lo = g_journal_selected - d;
+				if (lo >= first && journal_has(lo) == 0u) {
+					miss = lo;
+					found = 1u;
+					break;
+				}
+			}
+			{
+				uint32_t hi = g_journal_selected + d;
+				if (hi <= last && journal_has(hi) == 0u) {
+					miss = hi;
+					found = 1u;
+					break;
+				}
+			}
+		}
+	}
+	if (found == 0u) {
+		return 0u;
+	}
+	/* start..start+N-1 должно включать miss → назад максимум на N-1. */
+	start = miss;
+	while (start > first &&
+	       journal_has(start - 1u) == 0u &&
+	       (miss - start + 1u) < (uint32_t)PANEL_JOURNAL_PREFETCH_N) {
+		start--;
+	}
+	*out_idx = start;
+	return 1u;
+}
 
 void PanelDeviceCache_SetList(uint8_t selected_slot,
                               uint8_t count,
@@ -381,7 +607,8 @@ void PanelDeviceCache_SetList(uint8_t selected_slot,
                               const uint8_t *zone_name,
                               uint8_t zone_name_len)
 {
-    memset(PPKYConfig.CfgDevices, 0, sizeof(PPKYConfig.CfgDevices));
+    PanelHostCache *host = PanelHostCache_Get();
+    memset(host->devices, 0, sizeof(host->devices));
 
     uint16_t pos = 0u;
     for (uint8_t i = 0u; i < count; i++) {
@@ -398,24 +625,24 @@ void PanelDeviceCache_SetList(uint8_t selected_slot,
             continue;
         }
 
-        PPKYConfig.CfgDevices[slot].UId.devId.zone = zone;
-        PPKYConfig.CfgDevices[slot].UId.devId.l_adr = 0u;
-        PPKYConfig.CfgDevices[slot].UId.devId.h_adr = h_adr;
-        PPKYConfig.CfgDevices[slot].UId.devId.d_type = d_type;
+        host->devices[slot].zone = zone;
+        host->devices[slot].l_adr = 0u;
+        host->devices[slot].h_adr = h_adr;
+        host->devices[slot].d_type = d_type;
     }
 
     MenuUi_SetMcuDetailSlot(selected_slot);
 
     if (selected_slot < MAX_MCU_IN_BUS) {
-        uint8_t zone = PPKYConfig.CfgDevices[selected_slot].UId.devId.zone;
+        uint8_t zone = host->devices[selected_slot].zone;
         if (zone >= 1u && zone <= ZONE_NUMBER) {
             uint8_t zone_idx = (uint8_t)(zone - 1u);
-            memset(PPKYConfig.zone_name[zone_idx], 0, ZONE_NAME_SIZE);
+            memset(host->zone_name[zone_idx], 0, ZONE_NAME_SIZE);
             if (zone_name != 0 && zone_name_len != 0u) {
                 if (zone_name_len > ZONE_NAME_SIZE) {
                     zone_name_len = ZONE_NAME_SIZE;
                 }
-                memcpy(PPKYConfig.zone_name[zone_idx], zone_name, zone_name_len);
+                memcpy(host->zone_name[zone_idx], zone_name, zone_name_len);
             }
         }
     }
@@ -431,27 +658,29 @@ void PanelDeviceCache_SetDetail(uint8_t slot,
                                 const uint8_t *zone_name,
                                 uint8_t zone_name_len)
 {
+    PanelHostCache *host;
     if (slot >= MAX_MCU_IN_BUS) {
         return;
     }
 
-    PPKYConfig.CfgDevices[slot].UId.devId.zone = zone;
-    PPKYConfig.CfgDevices[slot].UId.devId.l_adr = 0u;
-    PPKYConfig.CfgDevices[slot].UId.devId.h_adr = h_adr;
-    PPKYConfig.CfgDevices[slot].UId.devId.d_type = d_type;
-    PPKYConfig.CfgDevices[slot].UId.UId0 = uid0;
-    PPKYConfig.CfgDevices[slot].UId.UId1 = uid1;
-    PPKYConfig.CfgDevices[slot].UId.UId2 = uid2;
+    host = PanelHostCache_Get();
+    host->devices[slot].zone = zone;
+    host->devices[slot].l_adr = 0u;
+    host->devices[slot].h_adr = h_adr;
+    host->devices[slot].d_type = d_type;
+    host->devices[slot].uid0 = uid0;
+    host->devices[slot].uid1 = uid1;
+    host->devices[slot].uid2 = uid2;
     MenuUi_SetMcuDetailSlot(slot);
 
     if (zone >= 1u && zone <= ZONE_NUMBER) {
         uint8_t zone_idx = (uint8_t)(zone - 1u);
-        memset(PPKYConfig.zone_name[zone_idx], 0, ZONE_NAME_SIZE);
+        memset(host->zone_name[zone_idx], 0, ZONE_NAME_SIZE);
         if (zone_name != 0 && zone_name_len != 0u) {
             if (zone_name_len > ZONE_NAME_SIZE) {
                 zone_name_len = ZONE_NAME_SIZE;
             }
-            memcpy(PPKYConfig.zone_name[zone_idx], zone_name, zone_name_len);
+            memcpy(host->zone_name[zone_idx], zone_name, zone_name_len);
         }
     }
 }
@@ -461,8 +690,9 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
                                 const uint8_t *items,
                                 uint16_t items_len)
 {
-    memset(PPKYConfig.zone_name, 0, sizeof(PPKYConfig.zone_name));
-    memset(PPKYConfig.zone_fire_mode, 0, sizeof(PPKYConfig.zone_fire_mode));
+    PanelHostCache *host = PanelHostCache_Get();
+    memset(host->zone_name, 0, sizeof(host->zone_name));
+    memset(host->zone_fire_mode, 0, sizeof(host->zone_fire_mode));
 
     uint16_t pos = 0u;
     for (uint8_t i = 0u; i < count; i++) {
@@ -489,8 +719,8 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
         if (name_len > ZONE_NAME_SIZE) {
             name_len = ZONE_NAME_SIZE;
         }
-        memcpy(PPKYConfig.zone_name[zone_idx], &items[pos], name_len);
-        PPKYConfig.zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
+        memcpy(host->zone_name[zone_idx], &items[pos], name_len);
+        host->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
         pos = (uint16_t)(pos + src_name_len);
     }
 
@@ -508,7 +738,7 @@ static void PanelJournalCache_ResetWindow(void)
 
 uint32_t PanelJournalCache_GetCapacity(void)
 {
-	return PANEL_JOURNAL_MAX_ITEMS;
+	return PANEL_JOURNAL_WINDOW;
 }
 
 uint32_t PanelJournalCache_GetCount(void)
@@ -528,17 +758,143 @@ uint8_t PanelJournalCache_TakeDirty(void)
 	return d;
 }
 
+void PanelJournalCache_PrefetchProcess(void)
+{
+	uint32_t miss;
+
+	if (RsPanelV3Slave_IsV3Active() == 0u) {
+		return;
+	}
+	/* Пока слот занят — не трогаем флаги (иначе Open залипает). */
+	if (RsPanelV3Slave_IsEventPending() != 0u) {
+		return;
+	}
+
+	if (g_journal_want_newest != 0u) {
+		if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_JOURNAL_GET, 0u, 2u, 0u, 0u) != 0u) {
+			/* Флаг снимем в SetList, когда придёт запись (или пустой total). */
+			g_journal_inflight = JOURNAL_NO_INFLIGHT;
+		}
+		return;
+	}
+
+	if (g_journal_total == 0u) {
+		return;
+	}
+
+	journal_trim_outside_window();
+
+	if (journal_pick_missing(&miss) == 0u) {
+		g_journal_inflight = JOURNAL_NO_INFLIGHT;
+		return;
+	}
+
+	/* JOURNAL_GET_N: u16_a=index, u16_b=n — до 3 записей, покрывая ближайшую дыру. */
+	if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_JOURNAL_GET_N, 0u, 0u,
+					(uint16_t)(miss & 0xFFFFu),
+					(uint16_t)PANEL_JOURNAL_PREFETCH_N) != 0u) {
+		g_journal_inflight = miss;
+	}
+}
+
 void PanelJournalCache_SetTotal(uint32_t total)
 {
 	g_journal_total = total;
-	if (g_journal_selected >= g_journal_total && g_journal_total > 0u) {
-		g_journal_selected = g_journal_total - 1u;
-	}
 	if (g_journal_total == 0u) {
 		PanelJournalCache_ResetWindow();
 		g_journal_selected = 0u;
+		g_journal_open_pending = 0u;
+		g_journal_want_newest = 0u;
+		g_journal_inflight = JOURNAL_NO_INFLIGHT;
+	} else if (g_journal_open_pending != 0u) {
+		g_journal_selected = g_journal_total - 1u;
+		g_journal_open_pending = 0u;
+	} else if (g_journal_selected >= g_journal_total) {
+		g_journal_selected = g_journal_total - 1u;
 	}
 	g_journal_dirty = 1u;
+	PanelJournalCache_PrefetchProcess();
+}
+
+void PanelJournalCache_OnSysReady(void)
+{
+	/* Фон при READY: новейшая + догрузка окна до WINDOW (по 3 через GET_N). */
+	PanelJournalCache_ResetWindow();
+	g_journal_total = 0u;
+	g_journal_selected = 0u;
+	g_journal_want_newest = 1u;
+	g_journal_open_pending = 1u;
+	g_journal_open_refresh = 0u;
+	g_journal_inflight = JOURNAL_NO_INFLIGHT;
+	g_journal_dirty = 1u;
+	PanelJournalCache_PrefetchProcess();
+}
+
+void PanelJournalCache_Open(void)
+{
+	/* Уже грузим с READY / Open — не сбрасывать mid-flight. */
+	if (g_journal_want_newest != 0u) {
+		g_journal_open_refresh = 1u;
+		PanelJournalCache_PrefetchProcess();
+		return;
+	}
+
+	if (g_journal_total == 0u) {
+		PanelJournalCache_OnSysReady();
+		return;
+	}
+
+	/* Сразу показать кэш (без лага), затем сверить total через GET u8_a=2. */
+	g_journal_selected = g_journal_total - 1u;
+	g_journal_inflight = JOURNAL_NO_INFLIGHT;
+	journal_trim_outside_window();
+	g_journal_dirty = 1u;
+	g_journal_want_newest = 1u;
+	g_journal_open_refresh = 1u;
+	PanelJournalCache_PrefetchProcess();
+}
+
+void PanelJournalCache_Navigate(uint8_t dir)
+{
+	if (g_journal_total == 0u) {
+		/* Ещё нет total — дожать стартовый GET. */
+		PanelJournalCache_PrefetchProcess();
+		return;
+	}
+	if (dir == 0u) {
+		/* новее */
+		if ((g_journal_selected + 1u) >= g_journal_total) {
+			return;
+		}
+		g_journal_selected++;
+	} else {
+		/* старее */
+		if (g_journal_selected == 0u) {
+			return;
+		}
+		g_journal_selected--;
+	}
+	/* Новое окно ±MARGIN: выкинуть старый край, дочитать дыры до запаса. */
+	g_journal_inflight = JOURNAL_NO_INFLIGHT;
+	journal_trim_outside_window();
+	g_journal_dirty = 1u;
+	PanelJournalCache_PrefetchProcess();
+}
+
+void PanelJournalCache_JumpNewest(void)
+{
+	if (g_journal_total == 0u) {
+		g_journal_want_newest = 1u;
+		g_journal_open_pending = 1u;
+		g_journal_inflight = JOURNAL_NO_INFLIGHT;
+		PanelJournalCache_PrefetchProcess();
+		return;
+	}
+	g_journal_selected = g_journal_total - 1u;
+	g_journal_inflight = JOURNAL_NO_INFLIGHT;
+	journal_trim_outside_window();
+	g_journal_dirty = 1u;
+	PanelJournalCache_PrefetchProcess();
 }
 
 static uint16_t panel_rs_get_u16le(const uint8_t *src)
@@ -600,53 +956,92 @@ void PanelJournalCache_SetList(uint32_t total,
 {
 	uint16_t pos = 0u;
 	uint8_t i;
+	const uint32_t prev_total = g_journal_total;
+	const uint8_t open_refresh = g_journal_open_refresh;
 
 	(void)window_first;
 
-	g_journal_total = total;
-	g_journal_selected = selected_idx;
-	if (g_journal_total > 0u && g_journal_selected >= g_journal_total) {
-		g_journal_selected = g_journal_total - 1u;
-	}
+	g_journal_want_newest = 0u;
+	g_journal_open_refresh = 0u;
 
-	PanelJournalCache_ResetWindow();
-
-	if (items == 0 || items_len == 0u || n_items == 0u || total == 0u) {
+	if (total == 0u) {
+		PanelJournalCache_ResetWindow();
+		g_journal_total = 0u;
+		g_journal_selected = 0u;
+		g_journal_open_pending = 0u;
+		g_journal_inflight = JOURNAL_NO_INFLIGHT;
 		g_journal_dirty = 1u;
 		return;
 	}
 
-	if (n_items > PANEL_JOURNAL_MAX_ITEMS) {
-		n_items = (uint8_t)PANEL_JOURNAL_MAX_ITEMS;
+	/* Open: сверка total — при расхождении сброс окна и прыжок на новейшую. */
+	if (open_refresh != 0u) {
+		if (total != prev_total) {
+			PanelJournalCache_ResetWindow();
+			g_journal_inflight = JOURNAL_NO_INFLIGHT;
+		}
+		g_journal_total = total;
+		g_journal_selected = selected_idx;
+		if (g_journal_selected >= g_journal_total) {
+			g_journal_selected = g_journal_total - 1u;
+		}
+		g_journal_open_pending = 0u;
+	} else {
+		g_journal_total = total;
+		if (g_journal_open_pending != 0u) {
+			/* Первый ответ после READY: позиция = новейшая с хоста. */
+			g_journal_selected = selected_idx;
+			if (g_journal_selected >= g_journal_total) {
+				g_journal_selected = g_journal_total - 1u;
+			}
+			g_journal_open_pending = 0u;
+		} else if (g_journal_selected >= g_journal_total) {
+			g_journal_selected = g_journal_total - 1u;
+		}
+	}
+
+	if (items == 0 || items_len == 0u || n_items == 0u) {
+		g_journal_dirty = 1u;
+		PanelJournalCache_PrefetchProcess();
+		return;
+	}
+
+	if (n_items > PANEL_JOURNAL_WINDOW) {
+		n_items = (uint8_t)PANEL_JOURNAL_WINDOW;
 	}
 
 	for (i = 0u; i < n_items; i++) {
-		PanelJournalEntry_t *e = &g_journal_entries[i];
+		PanelJournalEntry_t e;
 
+		memset(&e, 0, sizeof(e));
 		if ((uint16_t)(pos + 4u + 4u + 2u) > items_len) {
 			break;
 		}
 
-		e->rec_idx = panel_rs_get_u32le(&items[pos]);
+		e.rec_idx = panel_rs_get_u32le(&items[pos]);
 		pos += 4u;
-		e->ts = panel_rs_get_u32le(&items[pos]);
+		e.ts = panel_rs_get_u32le(&items[pos]);
 		pos += 4u;
-		e->code = panel_rs_get_u16le(&items[pos]);
+		e.code = panel_rs_get_u16le(&items[pos]);
 		pos += 2u;
 
-		if (panel_rs_get_counted_str(items, items_len, &pos, e->header, sizeof(e->header)) == 0u) {
+		if (panel_rs_get_counted_str(items, items_len, &pos, e.header, sizeof(e.header)) == 0u) {
 			break;
 		}
-		if (panel_rs_get_counted_str(items, items_len, &pos, e->title, sizeof(e->title)) == 0u) {
+		if (panel_rs_get_counted_str(items, items_len, &pos, e.title, sizeof(e.title)) == 0u) {
 			break;
 		}
-		if (panel_rs_get_counted_str(items, items_len, &pos, e->detail, sizeof(e->detail)) == 0u) {
+		if (panel_rs_get_counted_str(items, items_len, &pos, e.detail, sizeof(e.detail)) == 0u) {
 			break;
+		}
+		journal_store_entry(&e);
+		if (e.rec_idx == g_journal_inflight) {
+			g_journal_inflight = JOURNAL_NO_INFLIGHT;
 		}
 	}
 
-	g_journal_window_count = i;
 	g_journal_dirty = 1u;
+	PanelJournalCache_PrefetchProcess();
 }
 
 /* JOURNAL_DETAIL:
@@ -710,7 +1105,8 @@ static bool PanelJournalCache_ReadEntryByWindow(uint32_t window_index, PanelJour
 	if (out == 0) {
 		return false;
 	}
-	if (window_index >= g_journal_window_count) {
+	if (window_index >= g_journal_window_count ||
+	    g_journal_entries[window_index].valid == 0u) {
 		return false;
 	}
 	*out = g_journal_entries[window_index];
@@ -719,22 +1115,16 @@ static bool PanelJournalCache_ReadEntryByWindow(uint32_t window_index, PanelJour
 
 static bool PanelJournalCache_FindWindowIndex(uint32_t logical_index, uint32_t *window_index_out)
 {
-	uint32_t i;
+	int slot;
 	if (window_index_out == 0) {
 		return false;
 	}
-	for (i = 0u; i < g_journal_window_count; i++) {
-		if (g_journal_entries[i].rec_idx == logical_index) {
-			*window_index_out = i;
-			return true;
-		}
+	slot = journal_find_slot(logical_index);
+	if (slot < 0) {
+		return false;
 	}
-	/* Окно из 1 записи при selected — частый v3-случай. */
-	if (g_journal_window_count == 1u && logical_index == g_journal_selected) {
-		*window_index_out = 0u;
-		return true;
-	}
-	return false;
+	*window_index_out = (uint32_t)slot;
+	return true;
 }
 
 bool PanelJournalCache_ReadRecord(uint32_t logical_index, EventLogRecord_t *out_record)
