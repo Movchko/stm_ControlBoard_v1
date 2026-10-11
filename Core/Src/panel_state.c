@@ -370,7 +370,7 @@ static void panel_state_fill_caps(PanelStateContext *ctx)
 
     ctx->caps.fw_ver = (uint16_t)GetAppVersionU32();
     /* Формфактор PANEL_TYPE_1/2/3: и в CAPS.ui_profile, и в hw_id —
-     * ACTIVITY (1 Гц) несёт hw_id, ПО видит тип без CAPS_REQ. */
+     * RSP_ACTIVITY (по ACTIVITY_REQ) несёт hw_id, ПО видит тип без CAPS_REQ. */
     ctx->caps.hw_id = (uint16_t)PANEL_TYPE_NORMALIZE(pcfg->panel_type);
     ctx->caps.ui_profile = PANEL_TYPE_NORMALIZE(pcfg->panel_type);
     ctx->caps.disp_w = 128u;

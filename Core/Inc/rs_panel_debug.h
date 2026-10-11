@@ -68,6 +68,16 @@ typedef struct {
     volatile uint8_t  rx_arm_ok;
     volatile uint8_t  de_pin_level;
     volatile uint32_t rx_rearm_count;
+    /* FE/ORE recover + сторож RX (Live: растут = шина шумит, но RX жив). */
+    volatile uint32_t rx_err_count;
+    volatile uint32_t rx_last_err_code;
+    volatile uint32_t rx_rearm_wd;
+    volatile uint8_t  panel_addr;
+    /* Сырые байты последнего RX-события: A5 5A ... — кадр ППКУ; 00/FF/без A5 — шум/фронт DE. */
+    volatile uint8_t  rx_last_head[16];
+    volatile uint16_t rx_last_len;
+    /* Сколько IDLE-событий содержали 0xA5 (0 при шуме без преамбулы). */
+    volatile uint32_t rx_a5_seen;
 } RsPanelRsDebug;
 
 extern volatile RsPanelRsDebug g_rs_panel_dbg;

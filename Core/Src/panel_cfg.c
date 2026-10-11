@@ -52,9 +52,19 @@ uint8_t PanelCfg_IsVirgin(void)
 
 uint16_t PanelCfg_DiscoverDelayMs(void)
 {
-	/* 20..520 мс: разнос ответов virgin-панелей на DISCOVER. */
-	uint32_t mix = g_panel_cfg.uid0 ^ (g_panel_cfg.uid1 << 1) ^ g_panel_cfg.uid2;
-	return (uint16_t)(20u + (mix % 51u) * 10u);
+	/* 40..1040 мс: разнос ответов на DISCOVER (окно master = 1500 мс). */
+	uint32_t mix = g_panel_cfg.uid0 ^ (g_panel_cfg.uid1 * 0x01000193u) ^
+		       (g_panel_cfg.uid2 << 7);
+	return (uint16_t)(40u + (mix % 101u) * 10u);
+}
+
+uint16_t PanelCfg_ActivityPhaseMs(void)
+{
+	/* 0..990 мс: сдвиг 1 Гц ACTIVITY, иначе две панели с addr=1 TX одновременно
+	 * и WiFi/master не видит ни одной. */
+	uint32_t mix = g_panel_cfg.uid0 ^ (g_panel_cfg.uid1 * 0x85ebca6bu) ^
+		       (g_panel_cfg.uid2 * 0xc2b2ae35u);
+	return (uint16_t)((mix % 100u) * 10u);
 }
 
 uint8_t PanelCfg_FlashRead(DevicePanelConfig *out)

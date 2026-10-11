@@ -223,7 +223,7 @@ static void Beeper_Tim6Configure(void)
 static void Beeper_DacWrite(uint32_t level)
 {
 	//TODO DELETE  return;
-	//return;
+	return;
 
 	if (level > SOUND_DAC_LEVEL_MAX) {
 		level = SOUND_DAC_LEVEL_MAX;

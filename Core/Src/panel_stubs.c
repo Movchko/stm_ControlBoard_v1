@@ -284,7 +284,7 @@ static uint8_t s_pending_zone_mode_ui_change_idx = 0u;
 uint8_t PPKY_ZoneFireModeGet(uint8_t zone_idx)
 {
 	/* zone_idx в UI хранится 0-based. */
-	if (zone_idx >= ZONE_NUMBER) {
+	if (zone_idx >= 32) {
 		return 0u;
 	}
 	return PanelHostCache_GetConst()->zone_fire_mode[zone_idx];
@@ -292,7 +292,7 @@ uint8_t PPKY_ZoneFireModeGet(uint8_t zone_idx)
 
 void PPKY_ZoneFireModeSet(uint8_t zone_idx, uint8_t mode)
 {
-	if (zone_idx >= ZONE_NUMBER) {
+	if (zone_idx >= 32) {
 		return;
 	}
 	PanelHostCache_Get()->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
@@ -321,7 +321,7 @@ uint8_t PPKY_ZoneIsManualByCanZone(uint8_t zone_can)
 uint8_t PPKY_AnyZoneManualOrBlocked(void)
 {
 	const PanelHostCache *host = PanelHostCache_GetConst();
-	for (uint8_t i = 0u; i < ZONE_NUMBER; i++) {
+	for (uint8_t i = 0u; i < 32; i++) {
 		const uint8_t m = host->zone_fire_mode[i];
 		if (m == 2u || m == 3u) {
 			return 1u;
@@ -332,7 +332,7 @@ uint8_t PPKY_AnyZoneManualOrBlocked(void)
 void PPKY_ZoneFireModeInitFromGlobal(void) {}
 void PPKY_ZoneModeUiNotify(uint8_t zone_idx)
 {
-	if (zone_idx >= ZONE_NUMBER) {
+	if (zone_idx >= 32) {
 		return;
 	}
 	s_pending_zone_mode_ui_change = 1u;
@@ -635,7 +635,7 @@ void PanelDeviceCache_SetList(uint8_t selected_slot,
 
     if (selected_slot < MAX_MCU_IN_BUS) {
         uint8_t zone = host->devices[selected_slot].zone;
-        if (zone >= 1u && zone <= ZONE_NUMBER) {
+        if (zone >= 1u && zone <= 32) {
             uint8_t zone_idx = (uint8_t)(zone - 1u);
             memset(host->zone_name[zone_idx], 0, ZONE_NAME_SIZE);
             if (zone_name != 0 && zone_name_len != 0u) {
@@ -673,7 +673,7 @@ void PanelDeviceCache_SetDetail(uint8_t slot,
     host->devices[slot].uid2 = uid2;
     MenuUi_SetMcuDetailSlot(slot);
 
-    if (zone >= 1u && zone <= ZONE_NUMBER) {
+    if (zone >= 1u && zone <= 32) {
         uint8_t zone_idx = (uint8_t)(zone - 1u);
         memset(host->zone_name[zone_idx], 0, ZONE_NAME_SIZE);
         if (zone_name != 0 && zone_name_len != 0u) {
@@ -705,7 +705,7 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
         uint8_t src_name_len = items[pos++];
         uint8_t name_len = src_name_len;
 
-        if (zone_idx >= ZONE_NUMBER) {
+        if (zone_idx >= 32) {
             if ((uint16_t)(pos + name_len) > items_len) {
                 break;
             }
@@ -724,7 +724,7 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
         pos = (uint16_t)(pos + src_name_len);
     }
 
-    if (selected_zone_idx < ZONE_NUMBER) {
+    if (selected_zone_idx < 32) {
         MenuUi_SetBlockZoneSelected(selected_zone_idx);
         PPKY_ZoneModeUiNotify(selected_zone_idx);
     }
@@ -765,8 +765,9 @@ void PanelJournalCache_PrefetchProcess(void)
 	if (RsPanelV3Slave_IsV3Active() == 0u) {
 		return;
 	}
-	/* Пока слот занят — не трогаем флаги (иначе Open залипает). */
-	if (RsPanelV3Slave_IsEventPending() != 0u) {
+	/* Prefetch только в простой: иначе GET_N встаёт в хвост за UI или
+	 * при flush уходит не журнал, а голова очереди. */
+	if (RsPanelV3Slave_IsEventIdle() == 0u) {
 		return;
 	}
 
@@ -862,17 +863,19 @@ void PanelJournalCache_Navigate(uint8_t dir)
 		return;
 	}
 	if (dir == 0u) {
-		/* новее */
+		/* новее (UP): с последней → первая (wrap) */
 		if ((g_journal_selected + 1u) >= g_journal_total) {
-			return;
+			g_journal_selected = 0u;
+		} else {
+			g_journal_selected++;
 		}
-		g_journal_selected++;
 	} else {
-		/* старее */
+		/* старее (DOWN): с первой → последняя (wrap) */
 		if (g_journal_selected == 0u) {
-			return;
+			g_journal_selected = g_journal_total - 1u;
+		} else {
+			g_journal_selected--;
 		}
-		g_journal_selected--;
 	}
 	/* Новое окно ±MARGIN: выкинуть старый край, дочитать дыры до запаса. */
 	g_journal_inflight = JOURNAL_NO_INFLIGHT;

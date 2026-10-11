@@ -50,7 +50,7 @@ bool PanelJournalCache_ReadRecord(uint32_t logical_index, EventLogRecord_t *out_
  */
 void PanelJournalCache_OnSysReady(void);
 void PanelJournalCache_Open(void);
-/** dir: 0=новее (UP), 1=старее (DOWN). Сразу двигает selected, если есть куда. */
+/** dir: 0=новее (UP), 1=старее (DOWN). Wrap: last↔first. */
 void PanelJournalCache_Navigate(uint8_t dir);
 void PanelJournalCache_JumpNewest(void);
 /** Вызывать из Drain / OnPoll / Timer — шлёт следующий RS-запрос, если слот свободен. */

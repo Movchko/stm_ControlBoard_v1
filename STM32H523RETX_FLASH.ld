@@ -45,7 +45,9 @@ _Min_Stack_Size = 0x1000; /* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 272K
-  FLASH    (rx)    : ORIGIN = 0x08000000,/*0x0800E000,*/   LENGTH = 28*8K/*224K*/
+  /* App FLASH: −16K под FLASH_CATALOG (sector30) + FLASH_CFG (sector31). */
+  FLASH    (rx)    : ORIGIN = 0x08000000,/*0x0800E000,*/   LENGTH = 512k -16k
+  FLASH_CATALOG (r): ORIGIN = 0x0807C000,   LENGTH = 8K
   FLASH_CFG (r)    : ORIGIN = 0x0807E000,   LENGTH = 8K
 }
 
@@ -132,6 +134,15 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 	
+  .panel_catalog (NOLOAD) :
+  {
+    . = ALIGN(4);
+    _panel_catalog_start = .;
+    . = . + 0x2000;
+    . = ALIGN(4);
+    _panel_catalog_end = .;
+  } >FLASH_CATALOG
+
   .mku_cfg (NOLOAD) :
   {
     . = ALIGN(4);

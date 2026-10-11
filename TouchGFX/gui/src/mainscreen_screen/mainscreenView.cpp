@@ -77,6 +77,7 @@ uint8_t s_fire_remaining = 0u;
 uint8_t s_fire_active = 0u;
 char s_fire_center_text[32] = {0};
 uint8_t s_start_all_hold_shown = 0u;
+uint8_t s_new_event_expire_force = 0u; /* после 5 с новой неиспр./внимания → снова oldest */
 #if GOST_MODE
 uint8_t s_gost_force_fire_redraw = 0u;
 #endif
@@ -125,6 +126,7 @@ static void ui_reset_banner_state(void)
 	s_fire_active = 0u;
 	s_fire_center_text[0] = '\0';
 	s_start_all_hold_shown = 0u;
+	s_new_event_expire_force = 0u;
 #if GOST_MODE
 	s_gost_force_fire_redraw = 0u;
 #endif
@@ -181,12 +183,12 @@ static bool ui_fire_blocks_events(void)
 	if (s_fire_active == 0u) {
 		return false;
 	}
-	for (uint8_t i = 0u; i < s_fn_n; ++i) {
-		if (s_fn_modes[i] == 1u || s_fn_modes[i] == 2u) {
-			return true;
-		}
+	/* Как ППКУ1: пока пожарный UI жив (в т.ч. ТУШ.ВЫП / ПАУЗА / ПОЖАР1) —
+	 * pending неиспр. не перехватывает бегущую строку (иначе «ППКУ S/N»). */
+	if (s_fn_n > 0u) {
+		return true;
 	}
-	return (s_fn_n == 0u && (s_fire_mode == 1u || s_fire_mode == 2u));
+	return (s_fire_mode != 0u);
 }
 
 /* Удержание ПУСК ОБЩИЙ: по факту кнопки/FSM, а не по кэшу UI (иначе после отпускания
@@ -214,10 +216,7 @@ static UiBannerMode ui_highest_nonempty(void)
 			return (UiBannerMode)b;
 		}
 	}
-	/* SYS_HAS_FAULTS без списка FAULT_EVT — всё равно не НОРМА. */
-	if (RsPanelV3Slave_HasFaults() != 0u) {
-		return BANNER_FAULT;
-	}
+	/* Не поднимать FAULT без строк списка — иначе «АВАРИЯ»/НЕИСП до прихода SET. */
 	return BANNER_NONE;
 }
 
@@ -257,7 +256,7 @@ static void trim_zone_name(char* dst, size_t dst_size, const int8_t* src)
 static void ui_refresh_mode_list(void)
 {
 	s_mn_n = 0u;
-	for (uint8_t zi = 0u; zi < ZONE_NUMBER && s_mn_n < UI_LIST_CAPACITY; ++zi) {
+	for (uint8_t zi = 0u; zi < 32 && s_mn_n < UI_LIST_CAPACITY; ++zi) {
 		const uint8_t mode = PPKY_ZoneFireModeGet(zi);
 		if (mode != 2u && mode != 3u) {
 			continue;
@@ -278,17 +277,9 @@ static void ui_refresh_mode_list(void)
 
 static UiBannerMode ui_highest_nonempty_with_sys(void)
 {
-	const UiBannerMode hi = ui_highest_nonempty();
-#ifndef SIMULATOR
-	/* HAS_FAULTS уже есть, а список во view ещё пуст (logo→main / до push) —
-	 * всё равно FAULT, иначе ui_show_desired рисует НОРМА/залипает ПРОВЕРКА. */
-	if (hi == BANNER_NONE &&
-	    RsPanelV3Slave_IsSysReady() != 0u &&
-	    RsPanelV3Slave_HasFaults() != 0u) {
-		return BANNER_FAULT;
-	}
-#endif
-	return hi;
+	/* Только реальные списки (fire/attn/fault/mode). HAS_FAULTS без SET
+	 * больше не форсирует пустой FAULT — ждём FAULT_EVT. */
+	return ui_highest_nonempty();
 }
 
 static UiBannerMode ui_desired_banner(void)
@@ -305,6 +296,13 @@ static UiBannerMode ui_desired_banner(void)
 				s_gost_force_fire_redraw = 1u;
 			}
 #endif
+			/* Список newest-first (как ППКУ): 5 с новая (idx 0), затем oldest (n-1). */
+			if ((s_pending_banner == BANNER_FAULT || s_pending_banner == BANNER_ATTENTION) &&
+			    !s_manual_browse && ui_count(s_pending_banner) > 0u) {
+				const uint8_t n = ui_count(s_pending_banner);
+				s_cur[s_pending_banner] = (n > 1u) ? (uint8_t)(n - 1u) : 0u;
+				s_new_event_expire_force = 1u;
+			}
 			s_pending_banner = BANNER_NONE;
 		} else if (!ui_fire_blocks_events() && ui_count(s_pending_banner) > 0u) {
 			return s_pending_banner;
@@ -387,6 +385,10 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 		force = true;
 	}
 	const UiBannerMode desired = ui_desired_banner();
+	if (s_new_event_expire_force != 0u) {
+		s_new_event_expire_force = 0u;
+		force = true;
+	}
 #if GOST_MODE
 	if (s_gost_force_fire_redraw != 0u) {
 		s_gost_force_fire_redraw = 0u;
@@ -410,14 +412,8 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 		view->fireShowCurrentZone();
 		ui_clear_proverka_flags();
 	} else if (desired == BANNER_ATTENTION || desired == BANNER_FAULT) {
-		if (desired == BANNER_FAULT && s_wn_n == 0u &&
-		    RsPanelV3Slave_HasFaults() != 0u) {
-			s_wn_n = 1u;
-			std::strncpy(s_wn_titles[0], "НЕИСПР.", WARNING_TITLE_LEN - 1u);
-			s_wn_titles[0][WARNING_TITLE_LEN - 1u] = '\0';
-			s_wn_details[0][0] = '\0';
-			s_cur[BANNER_FAULT] = 0u;
-		}
+		/* Не подставлять фейковый «НЕИСПР.» при HAS_FAULTS без списка —
+		 * иначе АВАРИЯ НЕИСП на десятки секунд, пока не придут FAULT_SET. */
 		s_banner_mode = desired;
 		if (ui_count(desired) > 0u) {
 			view->warningShowCurrent();
@@ -1132,7 +1128,7 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		zmode = fire_zone_mode_at(idx);
 		zrem = fire_zone_remaining_at(idx);
 	}
-	(void)old_cur_mode;
+	const bool zone_mode_changed = (zmode != old_cur_mode);
 #endif
 	if (zmode != last_mode || zrem != last_remaining || s_banner_mode == BANNER_FIRE) {
 		last_mode = zmode;
@@ -1147,15 +1143,16 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		}
 	}
 #if GOST_MODE
-	/* Смена статуса текущей зоны (тушение/останов/…) — тоже новое сообщение на 5 с. */
+	/* Смена статуса текущей зоны (тушение/останов/…) — тоже новое сообщение на 5 с.
+	 * Force обязателен: иначе шапка ДО ПУСКА→ПАУЗА не обновляется (center уже «NСЕК.»). */
 	bool status_flash = false;
 	if (zone_mode_changed && zmode != 0u && !need_flash) {
 		ui_request_new_event(BANNER_FIRE, idx);
 		status_flash = true;
 	}
-	ui_show_desired(this, need_flash || status_flash);
+	ui_show_desired(this, need_flash || status_flash || zone_mode_changed);
 #else
-	ui_show_desired(this);
+	ui_show_desired(this, zone_mode_changed);
 #endif
 }
 
@@ -1184,12 +1181,8 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 	}
 	const bool attention_changed = !ui_attention_list_equals(attention_n, attention_titles, attention_details);
 	const bool fault_changed = !ui_warning_list_equals(fault_n, fault_titles, fault_details);
-	/* Кратковременное уменьшение n при CLEAR_ALL resync — не дёргать UI. */
-	static uint32_t s_fault_ui_ms = 0u;
-	const uint32_t now_ms = HAL_GetTick();
-	const bool fault_shrink_glitch =
-		(fault_n < s_wn_n && s_wn_n > 0u &&
-		 s_fault_ui_ms != 0u && (now_ms - s_fault_ui_ms) < 3000u);
+	/* Coalesce CLEAR_ALL→SET делает slave (quiet-timer). Здесь нельзя
+	 * глотать укорочение 4→3 — иначе «лишняя» неисправность залипает. */
 	bool need_force = false;
 	if (attention_changed) {
 		const bool attention_new =
@@ -1217,12 +1210,13 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		} else if (s_cur[BANNER_ATTENTION] >= s_an_n) {
 			s_cur[BANNER_ATTENTION] = 0u;
 		}
-		if (attention_new && s_manual_browse == 0u) {
+		/* Список newest-first: новая = idx 0; через 5 с → oldest (n-1). */
+		if (attention_new && s_manual_browse == 0u && attention_n > 0u) {
 			ui_request_new_event(BANNER_ATTENTION, 0u);
 			need_force = true;
 		}
 	}
-	if (fault_changed && !fault_shrink_glitch) {
+	if (fault_changed) {
 		const bool fault_grew = (fault_n > s_wn_n);
 		const uint8_t prev_cur = s_cur[BANNER_FAULT];
 		char keep_title[WARNING_TITLE_LEN];
@@ -1234,7 +1228,6 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		s_wn_n = fault_n;
 		memcpy(s_wn_titles, fault_titles, sizeof(s_wn_titles));
 		memcpy(s_wn_details, fault_details, sizeof(s_wn_details));
-		s_fault_ui_ms = now_ms;
 		if ((s_manual_browse != 0u || s_banner_mode == BANNER_FAULT) &&
 		    had_cur != 0u && s_wn_n > 0u) {
 			uint8_t found = 0xFFu;
@@ -1248,8 +1241,8 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		} else if (s_cur[BANNER_FAULT] >= s_wn_n) {
 			s_cur[BANNER_FAULT] = 0u;
 		}
-		/* Не прыгать на первую и не сбрасывать бегущую при пересборке — только рост. */
-		if (fault_grew && s_manual_browse == 0u) {
+		/* Рост списка: 5 с новая (idx 0), затем oldest — как ППКУ (newest-first). */
+		if (fault_grew && s_manual_browse == 0u && s_wn_n > 0u) {
 			ui_request_new_event(BANNER_FAULT, 0u);
 			need_force = true;
 		} else if (s_cur[BANNER_FAULT] != prev_cur) {

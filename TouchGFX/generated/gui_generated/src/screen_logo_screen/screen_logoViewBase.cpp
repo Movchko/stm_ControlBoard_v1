@@ -15,12 +15,6 @@ screen_logoViewBase::screen_logoViewBase() :
     image1.setXY(34, 0);
     image1.setBitmap(touchgfx::Bitmap(BITMAP_IMAGES_ID));
     add(image1);
-
-    animatedImage1.setXY(0, 18);
-    animatedImage1.setBitmaps(BITMAP_LOGO_SMALL_ID, BITMAP_LOGO_SMALL1_ID);
-    animatedImage1.setUpdateTicksInterval(60);
-    animatedImage1.startAnimation(false, true, true);
-    add(animatedImage1);
 }
 
 screen_logoViewBase::~screen_logoViewBase()

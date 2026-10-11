@@ -22,7 +22,7 @@ public:
 
 protected:
 #ifndef SIMULATOR
-    static const uint8_t MAX_ACTIVE_ZONES = ZONE_NUMBER;
+    static const uint8_t MAX_ACTIVE_ZONES = 32;
 
     uint8_t activeZoneIdx_[MAX_ACTIVE_ZONES];
     uint8_t activeZoneCount_;

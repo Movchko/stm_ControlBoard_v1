@@ -24,6 +24,8 @@ extern "C" {
 #define PANEL_APP_START_ADDR        0x0800E000u      /* сектор 7 */
 #define PANEL_APP_SIZE_SECTORS      28u
 #define PANEL_APP_SIZE_BYTES        (PANEL_APP_SIZE_SECTORS * 8u * 1024u)
+#define PANEL_FLASH_CATALOG_ADDR    0x0807C000u /* sector 30 Bank2 — v3 zone/MCU catalog */
+#define PANEL_FLASH_CATALOG_SIZE    0x2000u
 #define PANEL_FLASH_CFG_ADDR        0x0807E000u
 #define PANEL_FLASH_CFG_SIZE        0x2000u
 #define PANEL_FLASH_FOOTER_SZ       64u

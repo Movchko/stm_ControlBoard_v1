@@ -35,8 +35,8 @@ typedef struct {
     uint32_t host_uid1;
     uint32_t host_uid2;
     PanelHostDevice devices[MAX_MCU_IN_BUS];
-    int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE];
-    uint8_t zone_fire_mode[ZONE_NUMBER];
+    int8_t zone_name[32][ZONE_NAME_SIZE];
+    uint8_t zone_fire_mode[32];
 } PanelHostCache;
 
 void PanelHostCache_Init(void);

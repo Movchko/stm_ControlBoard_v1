@@ -474,18 +474,6 @@
             "Width": 60,
             "Height": 60,
             "RelativeFilename": "images.png"
-          },
-          {
-            "Type": "AnimatedImage",
-            "Name": "animatedImage1",
-            "Y": 18,
-            "Width": 29,
-            "Height": 29,
-            "FileNameFirst": "logo_small.png",
-            "FileNameLast": "logo_small1.png",
-            "UpdateTicksInterval": 1000,
-            "StartOnLoad": true,
-            "LoopEnabled": true
           }
         ],
         "Interactions": [

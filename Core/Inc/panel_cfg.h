@@ -35,6 +35,8 @@ uint8_t PanelCfg_Init(void);
 const DevicePanelConfig *PanelCfg_Get(void);
 /* Задержка ответа на DISCOVER (мс) по UID — разнос коллизий. */
 uint16_t PanelCfg_DiscoverDelayMs(void);
+/* Фаза ACTIVITY 0..990 мс по UID — две панели на одном addr не глушат друг друга. */
+uint16_t PanelCfg_ActivityPhaseMs(void);
 
 #ifdef __cplusplus
 }

@@ -81,7 +81,7 @@ void screen_devicesView::renderSelected()
 
     char zoneName[ZONE_NAME_SIZE + 1] = {0};
     uint8_t zone_idx = (curr->zone == 0u) ? 0u : (uint8_t)(curr->zone - 1u);
-    if (zone_idx < ZONE_NUMBER) {
+    if (zone_idx < 32) {
         trimZoneName(zoneName, sizeof(zoneName), host->zone_name[zone_idx], ZONE_NAME_SIZE);
     }
     if (zoneName[0] == '\0') {

@@ -1282,18 +1282,20 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
             /* v3 payload: ver=0x03 … ; иначе legacy PollReq. */
             if (frame->payload_len > 0u && frame->payload != 0 &&
                 frame->payload[0] == RS_PANEL_V3_VERSION) {
-                if (RsPanelV3Slave_OnPoll(frame->payload, frame->payload_len) != 0u) {
-                    uint8_t payload[96];
-                    uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
-                    if (plen > 0u) {
-                        /* OnTxFrame внутри rs_bus_send_frame увеличит poll_rsp_tx. */
-                        RsPanelDebug_OnPollRsp(0u, 0u);
-                        rs_bus_send_frame(endpoint, endpoint->panel_addr,
-                                          endpoint->next_tx_seq++,
-                                          RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
-                                          payload, plen);
-                    }
+                /* ВАЖНО: этот путь в UART RX IDLE IRQ. OnPoll тяжёлый (RTC/UI).
+                 * Раньше: OnPoll→BuildRsp→TX — ответ уходил после десятков мс,
+                 * master (quiet 25 мс) уже слал следующий POLL → коллизия,
+                 * на ППКУ rx без 0xA5. Сначала короткий RSP, потом apply. */
+                uint8_t payload[96];
+                uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+                if (plen > 0u) {
+                    RsPanelDebug_OnPollRsp(0u, 0u);
+                    rs_bus_send_frame(endpoint, endpoint->panel_addr,
+                                      endpoint->next_tx_seq++,
+                                      RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
+                                      payload, plen);
                 }
+                (void)RsPanelV3Slave_OnPoll(frame->payload, frame->payload_len);
             } else {
                 RsPanelPollReq req;
                 if (rs_decode_poll_req(frame->payload, frame->payload_len, &req)) {
@@ -1326,13 +1328,8 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         }
         break;
     case RS_PANEL_CMD_UI_NAV:
-        {
-            RsPanelUiNavCmd nav_cmd;
-            if (rs_decode_ui_nav_cmd(frame->payload, frame->payload_len, &nav_cmd)) {
-                endpoint->state.current_screen = nav_cmd.screen_id;
-                rs_queue_nav(nav_cmd.screen_id, nav_cmd.action);
-            }
-        }
+        /* Legacy: мастер вёл экраны «глупой» панели. Сейчас UI свой (TouchGFX) —
+         * кадр игнорируем (не GotoScreen), ACK если просили. */
         if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
             rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         }
@@ -1373,6 +1370,12 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         PanelUpd_RequestEnterBootloader(endpoint->panel_addr);
         break;
+    case RS_PANEL_CMD_ACTIVITY_REQ:
+        /* Только unicast на свой addr — broadcast дал бы dual-TX на half-duplex. */
+        if (frame->addr == endpoint->panel_addr) {
+            rs_send_activity(endpoint);
+        }
+        break;
     case RS_PANEL_CMD_DISCOVER:
         /* Ответ со случайной задержкой — из Timer10ms (не TX из RX IRQ пачкой). */
         endpoint->discover_pending = 1u;
@@ -1405,6 +1408,8 @@ void RsPanelEndpoint_Init(void)
     g_endpoint.panel_addr = addr;
     PanelBoot_SetRsAddr(g_endpoint.panel_addr);
     g_endpoint.next_tx_seq = 1u;
+    /* uptime_sec++ в Timer10ms; ACTIVITY только по ACTIVITY_REQ от ППКУ. */
+    g_activity_accum_ms = 0u;
     PanelState_Init(&g_endpoint.state);
     /* OLED remap после чтения Flash (type3 → A0/C0). */
     Display_ApplyPanelType(PanelCfg_Get()->panel_type);
@@ -1413,6 +1418,8 @@ void RsPanelEndpoint_Init(void)
 
 void RsPanelEndpoint_Timer10ms(void)
 {
+    /* FE/ORE без ErrorCallback оставляли RX мёртвым — сторож поднимает DMA. */
+    RsBus_RxWatchdog(&g_endpoint.bus);
     /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
      * иначе WARN попадает в уничтожаемый view, а setupScreen снова рисует «НОРМА». */
     PanelUpd_Timer10ms();
@@ -1428,33 +1435,61 @@ void RsPanelEndpoint_Timer10ms(void)
     PanelState_SampleButtons(&g_endpoint.state);
     RsPanelV3Slave_DrainPanelState(&g_endpoint.state);
     RsPanelV3Slave_Timer10ms();
-    if (PanelState_TakeCapsResyncPending(&g_endpoint.state) != 0u) {
-        rs_send_caps(&g_endpoint, g_endpoint.panel_addr, g_endpoint.next_tx_seq++);
-    }
+    /* CAPS только по CAPS_REQ / PROFILE_SET — без незапрошенного TX. */
+    (void)PanelState_TakeCapsResyncPending(&g_endpoint.state);
     g_rs_panel_dbg.current_screen = g_endpoint.state.current_screen;
     g_rs_panel_dbg.pending_ui_count = g_endpoint.state.pending_ui_count;
     g_rs_panel_dbg.pending_btn_count = g_endpoint.state.pending_btn_count;
     RsPanelDebug_Timer10ms(HAL_GetTick());
+    g_rs_panel_dbg.rx_err_count = g_endpoint.bus.rx_err_count;
+    g_rs_panel_dbg.rx_last_err_code = g_endpoint.bus.rx_last_err_code;
+    g_rs_panel_dbg.rx_rearm_wd = g_endpoint.bus.rx_rearm_wd;
+    g_rs_panel_dbg.panel_addr = g_endpoint.panel_addr;
     PanelLinkMonitor_Timer10ms();
     g_activity_accum_ms += 10u;
     if (g_activity_accum_ms >= 1000u) {
         g_activity_accum_ms = 0u;
         g_uptime_sec++;
-        rs_send_activity(&g_endpoint);
     }
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
+    static uint8_t s_rx_shadow[RS_BUS_RX_DMA_SIZE];
+    uint16_t n;
+
     if (huart != &huart4 || size == 0u) {
         return;
     }
-    RsPanelDebug_OnRxDma(size);
-    RsBus_ProcessRxBytes(&g_endpoint.bus, g_endpoint.bus.rx_dma_buf, size);
-    (void)HAL_UARTEx_ReceiveToIdle_DMA(&huart4,
-                                       g_endpoint.bus.rx_dma_buf,
-                                       sizeof(g_endpoint.bus.rx_dma_buf));
-    if (huart4.hdmarx != 0) {
-        __HAL_DMA_DISABLE_IT(huart4.hdmarx, DMA_IT_HT);
+    n = size;
+    if (n > (uint16_t)sizeof(s_rx_shadow)) {
+        n = (uint16_t)sizeof(s_rx_shadow);
     }
+    memcpy(s_rx_shadow, g_endpoint.bus.rx_dma_buf, n);
+    /* Сразу re-arm: разбор+ответ в IRQ дольше байта @2 Мбод. */
+    RsBus_RxRearmFromIsr(&g_endpoint.bus);
+    RsPanelDebug_OnRxDma(n);
+    {
+        uint16_t i;
+        g_rs_panel_dbg.rx_last_len = n;
+        for (i = 0u; i < (uint16_t)sizeof(g_rs_panel_dbg.rx_last_head); i++) {
+            g_rs_panel_dbg.rx_last_head[i] = (i < n) ? s_rx_shadow[i] : 0u;
+        }
+        for (i = 0u; i < n; i++) {
+            if (s_rx_shadow[i] == 0xA5u) {
+                g_rs_panel_dbg.rx_a5_seen++;
+                break;
+            }
+        }
+    }
+    RsBus_ProcessRxBytes(&g_endpoint.bus, s_rx_shadow, n);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart != &huart4) {
+        return;
+    }
+    /* Без этого первая FE на шине → HAL abort RX → панель глухая навсегда. */
+    RsBus_RecoverFromError(&g_endpoint.bus);
 }

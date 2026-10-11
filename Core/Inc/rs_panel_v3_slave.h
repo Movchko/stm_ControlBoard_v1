@@ -26,11 +26,14 @@ uint8_t RsPanelV3Slave_IsHoldActive(void);
 /** Секунды до конца удержания ПУСК ОБЩИЙ (1..3), 0 если не удерживается. */
 uint8_t RsPanelV3Slave_GetHoldRemainingSec(void);
 
-/* Поставить событие в слот (0 = занято/отказ). */
+/* В общую очередь EVT (или сразу в слот). Fire-ctrl — после последнего fire
+ * в очереди (2-е/2+ место). Обычные — в хвост. 0 только при type=NONE. */
 uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
                                  uint16_t u16_a, uint16_t u16_b);
-/** 1 = слот события занят (ждём ACK). */
+/** 1 = слот события занят (ждём ACK). Очередь может быть непустой отдельно. */
 uint8_t RsPanelV3Slave_IsEventPending(void);
+/** 1 = слот и очередь пусты (можно ставить фоновый prefetch журнала). */
+uint8_t RsPanelV3Slave_IsEventIdle(void);
 
 /* Локальный hold ПУСК ОБЩИЙ / ОСТАНОВ (фаза 2). */
 void RsPanelV3Slave_OnButtonSample(void);

@@ -77,7 +77,9 @@ void ScreenMenu_ConnectionPresenter::handleButton(uint8_t but, uint8_t state)
     }
 
     if (but == BUT_ENTER) {
-        /* При v3 WIFI/EXT_CAN шлёт Drain по CONFIRM; локально только UI-кэш без хоста. */
+        /* Надпись из EspManager_IsUserWifiOn / rs485_on.
+         * v3: toggle+EVT в DrainPanelState (CONFIRM) — здесь только refresh.
+         * legacy: кэш обновляем локально (хост шлёт UI_DATA). */
         if (RsPanelV3Slave_IsV3Active() == 0u) {
             if (currentIndex == 0) {
                 if (MenuUi_IsWifiBlocked() != 0u) {

@@ -66,7 +66,7 @@ void ScreenBlockZoneView::refreshZoneUi()
 {
     activeZoneCount_ = 0u;
     const PanelHostCache *host = PanelHostCache_GetConst();
-    for (uint8_t zi = 0u; zi < ZONE_NUMBER; zi++) {
+    for (uint8_t zi = 0u; zi < 32; zi++) {
         if (host->zone_name[zi][0] == 0) {
             continue;
         }
