@@ -12,8 +12,13 @@ extern "C" {
 void RsPanelV3Slave_Init(void);
 void RsPanelV3Slave_Timer10ms(void);
 
-/* Применить POLL v3; вернуть 1 если payload v3. */
-uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len);
+/* Только ACK полос — безопасно из UART IRQ (до deferred body). */
+uint8_t RsPanelV3Slave_OnPollAcks(const uint8_t *payload, uint16_t len);
+/* ZONE_NAMES/DEVICES/FAULT_EVT — из UART IRQ (без RsPanelV3Poll на стеке).
+ * Иначе один deferred-буфер затирает CLEAR/ADD → devices_crc залипает в 0xFFFF. */
+uint8_t RsPanelV3Slave_OnPollStream(const uint8_t *payload, uint16_t len);
+/* SYS/ZONES/TIME/… без ACK и без каталог-stream — из main/TouchGFX tick. */
+uint8_t RsPanelV3Slave_OnPollBody(const uint8_t *payload, uint16_t len);
 
 /* Собрать RSP v3. */
 uint16_t RsPanelV3Slave_BuildRsp(uint8_t *dst, uint16_t dst_size);
@@ -23,16 +28,17 @@ uint8_t RsPanelV3Slave_HasFaults(void);
 uint8_t RsPanelV3Slave_IsFireActive(void);
 uint8_t RsPanelV3Slave_IsConfigActive(void);
 uint8_t RsPanelV3Slave_IsHoldActive(void);
-/** Секунды до конца удержания ПУСК ОБЩИЙ (1..3), 0 если не удерживается. */
+/** Секунды UI-таймера: ПУСК ОБЩИЙ или countdown ПУСК СП (малая), 0 если нет. */
 uint8_t RsPanelV3Slave_GetHoldRemainingSec(void);
 
-/* В общую очередь EVT (или сразу в слот). Fire-ctrl — после последнего fire
- * в очереди (2-е/2+ место). Обычные — в хвост. 0 только при type=NONE. */
+/* Две независимые EVT-линии (без вытеснения между ними):
+ * ordinary — журнал/меню/wifi/…; critical — START_SP/STOP/START_ALL/FIRE_RESET.
+ * 0 только при type=NONE. */
 uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
                                  uint16_t u16_a, uint16_t u16_b);
-/** 1 = слот события занят (ждём ACK). Очередь может быть непустой отдельно. */
+/** 1 = ordinary или critical слот занят (ждём ACK). */
 uint8_t RsPanelV3Slave_IsEventPending(void);
-/** 1 = слот и очередь пусты (можно ставить фоновый prefetch журнала). */
+/** 1 = обе линии пусты (слоты и очереди). */
 uint8_t RsPanelV3Slave_IsEventIdle(void);
 
 /* Локальный hold ПУСК ОБЩИЙ / ОСТАНОВ (фаза 2). */

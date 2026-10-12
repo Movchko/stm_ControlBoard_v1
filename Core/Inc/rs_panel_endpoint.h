@@ -13,12 +13,6 @@ typedef struct {
     PanelStateContext state;
     uint8_t panel_addr;
     uint8_t next_tx_seq;
-    uint8_t frag_active;
-    uint8_t frag_id;
-    uint8_t frag_next_idx;
-    uint8_t frag_total;
-    uint16_t frag_len;
-    uint8_t frag_buf[2048];
     /* Отложенный RSP_DISCOVER (разнос по UID). */
     uint8_t discover_pending;
     uint16_t discover_delay_ticks; /* 10 мс тики */
@@ -32,6 +26,16 @@ void RsPanelEndpoint_QueueWarningUi(uint8_t active,
                                     uint8_t n_items,
                                     char (*titles)[24],
                                     char (*details)[ZONE_NAME_SIZE + 1]);
+/** Очередь FIRE UI (из UART/OnPoll) → TouchGFX tick.
+ *  Не вызывать PanelUiBridge_SetFireStatus из IRQ: при FIRE_ACTIVE ZONES
+ *  в каждом POLL, иначе OnPoll тормозит шину и fire-ctrl EVT (START_SP) теряется. */
+void RsPanelEndpoint_QueueFireUi(uint8_t active,
+                                 uint8_t mode,
+                                 uint8_t remaining_s,
+                                 uint8_t n_zones,
+                                 char (*zone_names)[ZONE_NAME_SIZE + 1],
+                                 const uint8_t *zone_modes,
+                                 const uint8_t *zone_remaining);
 /** Очередь SYS_READY 0→1 → снять «ПРОВЕРКА» в TouchGFX tick (после WARN). */
 void RsPanelEndpoint_QueueSysReadyNotify(void);
 /** Отложенный переход на MAIN (из Timer10ms — не из UART IRQ). */

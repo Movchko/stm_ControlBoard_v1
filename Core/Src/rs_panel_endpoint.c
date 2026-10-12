@@ -1,5 +1,6 @@
 #include "rs_panel_endpoint.h"
 #include "rs_panel_v3_slave.h"
+#include "rs_bus_frame.h"
 
 #include <string.h>
 
@@ -74,14 +75,16 @@ static DeferredWarnUi s_deferred_warn;
 static volatile uint8_t s_fire_pending;
 static volatile uint8_t s_warn_pending;
 static volatile uint8_t s_sys_ready_pending;
-static uint8_t s_warn_ui_active = 0u;
-static uint8_t s_warn_ui_has_fault = 0u;
-/* MAIN_FIRE hold ПУСК ОБЩИЙ (mode=1, n_zones=0): не гасить NORM по fire_active. */
-static uint8_t s_fire_hold_idle = 0u;
-
-/* 0x01 в первом байте title — маркер ВНИМАНИЕ (WARN_TITLE_MARK_ATTN на ППКУ). */
-#define PANEL_WARN_TITLE_MARK_ATTN 0x01u
-
+/* POLL body вне UART IRQ: при FIRE+ZONES полный OnPoll в IDLE держал шину,
+ * RSP с event_crit не доходил до Fire_OnPanelStartSp. ACK — сразу в IRQ.
+ * Один слот затирал DEV_CLEAR→DEV_ADD: catalog count=0, devices_crc=0xFFFF,
+ * а UI неисправностей МКУ жил из FAULT_EVT.mcu — казалось, что «МКУ есть». */
+#define RS_DEFER_POLL_Q 8u
+static uint8_t s_deferred_poll_q[RS_DEFER_POLL_Q][RS_BUS_MAX_WIRE_PAYLOAD];
+static uint16_t s_deferred_poll_q_len[RS_DEFER_POLL_Q];
+static volatile uint8_t s_defer_poll_head; /* pop */
+static volatile uint8_t s_defer_poll_tail; /* push */
+static volatile uint8_t s_defer_poll_n;
 typedef struct {
     uint16_t screen_id;
     uint8_t action;
@@ -172,6 +175,18 @@ void RsPanelEndpoint_QueueWarningUi(uint8_t active,
     rs_queue_warn_ui(active, n_items, titles, details);
 }
 
+void RsPanelEndpoint_QueueFireUi(uint8_t active,
+                                 uint8_t mode,
+                                 uint8_t remaining_s,
+                                 uint8_t n_zones,
+                                 char (*zone_names)[ZONE_NAME_SIZE + 1],
+                                 const uint8_t *zone_modes,
+                                 const uint8_t *zone_remaining)
+{
+    rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names, zone_modes,
+                     zone_remaining);
+}
+
 void RsPanelEndpoint_QueueSysReadyNotify(void)
 {
     s_sys_ready_pending = 1u;
@@ -182,8 +197,69 @@ void RsPanelEndpoint_QueueGotoMain(void)
     rs_queue_nav(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
 }
 
+static void rs_poll_body_enqueue(const uint8_t *payload, uint16_t len)
+{
+    uint32_t primask;
+    if (payload == 0 || len == 0u || len > RS_BUS_MAX_WIRE_PAYLOAD) {
+        return;
+    }
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (s_defer_poll_n >= RS_DEFER_POLL_Q) {
+        /* Переполнение: вытолкнуть самый старый (лучше потерять ранний, чем
+         * затереть единственный слот новым и потерять CLEAR перед ADD). */
+        s_defer_poll_head = (uint8_t)((s_defer_poll_head + 1u) % RS_DEFER_POLL_Q);
+        s_defer_poll_n--;
+    }
+    memcpy(s_deferred_poll_q[s_defer_poll_tail], payload, len);
+    s_deferred_poll_q_len[s_defer_poll_tail] = len;
+    s_defer_poll_tail = (uint8_t)((s_defer_poll_tail + 1u) % RS_DEFER_POLL_Q);
+    s_defer_poll_n++;
+    if (primask == 0u) {
+        __enable_irq();
+    }
+}
+
+static void rs_poll_body_drain(void)
+{
+    uint8_t buf[RS_BUS_MAX_WIRE_PAYLOAD];
+    uint32_t primask;
+    uint8_t guard;
+
+    /* Слить всю очередь за тик — каталог DEV_CLEAR+N×ADD не должен копиться. */
+    for (guard = 0u; guard < RS_DEFER_POLL_Q; guard++) {
+        uint16_t plen;
+        uint8_t head;
+        primask = __get_PRIMASK();
+        __disable_irq();
+        if (s_defer_poll_n == 0u) {
+            if (primask == 0u) {
+                __enable_irq();
+            }
+            break;
+        }
+        head = s_defer_poll_head;
+        plen = s_deferred_poll_q_len[head];
+        if (plen > (uint16_t)sizeof(buf)) {
+            plen = (uint16_t)sizeof(buf);
+        }
+        if (plen > 0u) {
+            memcpy(buf, s_deferred_poll_q[head], plen);
+        }
+        s_defer_poll_head = (uint8_t)((head + 1u) % RS_DEFER_POLL_Q);
+        s_defer_poll_n--;
+        if (primask == 0u) {
+            __enable_irq();
+        }
+        if (plen > 0u) {
+            (void)RsPanelV3Slave_OnPollBody(buf, plen);
+        }
+    }
+}
+
 void RsPanelEndpoint_ProcessDeferredUi(void)
 {
+    rs_poll_body_drain();
     if (s_nav_pending != 0u) {
         s_nav_pending = 0u;
         PanelUiBridge_GotoScreen(s_deferred_nav.screen_id, s_deferred_nav.action);
@@ -260,23 +336,6 @@ static uint16_t rs_put_u32le(uint8_t *dst, uint32_t value)
     return 4u;
 }
 
-static void rs_frag_reset(RsPanelEndpoint *endpoint)
-{
-    if (endpoint == 0) {
-        return;
-    }
-    endpoint->frag_active = 0u;
-    endpoint->frag_id = 0u;
-    endpoint->frag_next_idx = 0u;
-    endpoint->frag_total = 0u;
-    endpoint->frag_len = 0u;
-}
-
-static uint8_t rs_bcd_from_bin(uint8_t value)
-{
-    return (uint8_t)(((value / 10u) << 4) | (value % 10u));
-}
-
 static uint16_t rs_encode_caps(uint8_t *dst, uint16_t dst_size, const RsPanelCaps *caps)
 {
     uint16_t pos = 0u;
@@ -304,109 +363,6 @@ static uint16_t rs_encode_caps(uint8_t *dst, uint16_t dst_size, const RsPanelCap
     dst[pos++] = caps->flags;
     dst[pos++] = caps->status;
     return pos;
-}
-
-static uint8_t rs_decode_poll_req(const uint8_t *src, uint16_t src_len, RsPanelPollReq *out_req)
-{
-    if (src == 0 || out_req == 0 || src_len < 2u) {
-        return 0u;
-    }
-    out_req->flags = src[0];
-    out_req->ack_seq = src[1];
-    return 1u;
-}
-
-static uint16_t rs_encode_poll_rsp(uint8_t *dst, uint16_t dst_size, const RsPanelPollRsp *rsp)
-{
-    uint16_t pos = 0u;
-    uint8_t i;
-
-    if (dst == 0 || rsp == 0 || dst_size < 3u) {
-        return 0u;
-    }
-    dst[pos++] = rsp->status;
-    dst[pos++] = rsp->evt_count;
-    for (i = 0u; i < rsp->evt_count; i++) {
-        dst[pos++] = rsp->btn_events[i].type;
-        dst[pos++] = rsp->btn_events[i].state;
-        dst[pos++] = rsp->btn_events[i].level;
-    }
-    dst[pos++] = rsp->ui_evt_count;
-    for (i = 0u; i < rsp->ui_evt_count; i++) {
-        dst[pos++] = rsp->ui_events[i].evt_type;
-        pos += rs_put_u16le(&dst[pos], rsp->ui_events[i].p1);
-        pos += rs_put_u16le(&dst[pos], rsp->ui_events[i].p2);
-    }
-    return pos;
-}
-
-static uint8_t rs_decode_led_cmd(const uint8_t *src, uint16_t src_len, RsPanelLedCmd *out_cmd)
-{
-    uint16_t pos = 0u;
-    uint8_t i;
-
-    if (src == 0 || out_cmd == 0 || src_len < 1u) {
-        return 0u;
-    }
-    memset(out_cmd, 0, sizeof(*out_cmd));
-    out_cmd->count = src[pos++];
-    if (out_cmd->count > RS_PANEL_MAX_LED_ITEMS) {
-        return 0u;
-    }
-    for (i = 0u; i < out_cmd->count; i++) {
-        if ((uint16_t)(pos + 3u) > src_len) {
-            return 0u;
-        }
-        out_cmd->items[i].type = src[pos++];
-        out_cmd->items[i].mode = src[pos++];
-        out_cmd->items[i].value = src[pos++];
-    }
-    return 1u;
-}
-
-static uint8_t rs_decode_sound_cmd(const uint8_t *src, uint16_t src_len, RsPanelSoundCmd *out_cmd)
-{
-    if (src == 0 || out_cmd == 0 || src_len < 2u) {
-        return 0u;
-    }
-    memset(out_cmd, 0, sizeof(*out_cmd));
-    out_cmd->profile = src[0];
-    out_cmd->mute = src[1];
-    if (out_cmd->profile == RS_PANEL_SOUND_CUSTOM) {
-        if (src_len < 9u) {
-            return 0u;
-        }
-        out_cmd->on_ms = rs_get_u16le(&src[2]);
-        out_cmd->off_ms = rs_get_u16le(&src[4]);
-        out_cmd->pulses = src[6];
-        out_cmd->repeat_ms = rs_get_u16le(&src[7]);
-    }
-    return 1u;
-}
-
-static uint8_t rs_decode_time_cmd(const uint8_t *src, uint16_t src_len, RsPanelTimeCmd *out_cmd)
-{
-    if (src == 0 || out_cmd == 0 || src_len < 6u) {
-        return 0u;
-    }
-    out_cmd->hour = src[0];
-    out_cmd->min = src[1];
-    out_cmd->sec = src[2];
-    out_cmd->day = src[3];
-    out_cmd->month = src[4];
-    out_cmd->year = src[5];
-    return 1u;
-}
-
-static uint8_t rs_decode_ui_nav_cmd(const uint8_t *src, uint16_t src_len, RsPanelUiNavCmd *out_cmd)
-{
-    if (src == 0 || out_cmd == 0 || src_len < 5u) {
-        return 0u;
-    }
-    out_cmd->screen_id = rs_get_u16le(&src[0]);
-    out_cmd->action = src[2];
-    out_cmd->param = rs_get_u16le(&src[3]);
-    return 1u;
 }
 
 static uint8_t rs_decode_profile_set_cmd(const uint8_t *src, uint16_t src_len, RsPanelProfileSetCmd *out_cmd)
@@ -441,621 +397,6 @@ static uint8_t rs_decode_profile_set_cmd(const uint8_t *src, uint16_t src_len, R
     return 1u;
 }
 
-static uint8_t rs_led_type_to_local(uint8_t type)
-{
-    switch (type) {
-    case RS_PANEL_LED_POWER: return LED_POWER;
-    case RS_PANEL_LED_NORM: return LED_NORM;
-    case RS_PANEL_LED_START: return LED_START;
-    case RS_PANEL_LED_STOP: return LED_STOP;
-    case RS_PANEL_LED_ERR: return LED_ERR;
-    case RS_PANEL_LED_FIRE: return LED_FIRE;
-    case RS_PANEL_LED_AUTO_OFF: return LED_AUTO_OFF;
-    case RS_PANEL_LED_BUT_START_ALL: return LED_BUT_START_ALL;
-    case RS_PANEL_LED_BUT_STOP: return LED_BUT_STOP;
-    case RS_PANEL_LED_BUT_START_SP: return LED_BUT_START_SP;
-    case RS_PANEL_LED_BUT_ENTER: return LED_BUT_ENTER_UP;
-    case RS_PANEL_LED_BUT_ESC: return LED_BUT_ESC_DW;
-    case RS_PANEL_LED_LBL_START_ALL: return LED_STR_START_ALL;
-    case RS_PANEL_LED_LBL_STOP: return LED_STR_STOP;
-    case RS_PANEL_LED_LBL_START_SP: return LED_STR_START_SP;
-    default: return 0xFFu;
-    }
-}
-
-static void rs_apply_leds(const RsPanelLedCmd *cmd)
-{
-    if (RsPanelV3Slave_IsV3Active() != 0u) {
-        return;
-    }
-    uint8_t i;
-
-    if (cmd == 0) {
-        return;
-    }
-
-    for (i = 0u; i < cmd->count; i++) {
-        uint8_t led = rs_led_type_to_local(cmd->items[i].type);
-        if (led == 0xFFu) {
-            continue;
-        }
-
-        switch (cmd->items[i].mode) {
-        case RS_PANEL_LED_MODE_OFF:
-            Led_Set(led, 0u);
-            break;
-        case RS_PANEL_LED_MODE_ON:
-            Led_Set(led, 1u);
-            break;
-        case RS_PANEL_LED_MODE_BLINK:
-            Led_Set(led, 2u);
-            /* Иначе мигание идёт с тусклой/нулевой яркостью после IDLE. */
-            Led_SetBrightness(led, LED_BUT_MAX_BRIGHTNESS);
-            Led_ForceStatusBright(led);
-            break;
-        case RS_PANEL_LED_MODE_BRIGHT:
-            Led_Set(led, 1u);
-            Led_SetBrightness(led, cmd->items[i].value);
-            if (led == LED_START || led == LED_FIRE) {
-                Led_ForceStatusBright(led);
-            }
-            break;
-        default:
-            break;
-        }
-    }
-}
-
-static RsPanelSoundCmd s_last_sound_cmd;
-static uint8_t s_last_sound_valid = 0u;
-
-static uint8_t rs_sound_cmd_same(const RsPanelSoundCmd *a, const RsPanelSoundCmd *b)
-{
-    if (a == 0 || b == 0) {
-        return 0u;
-    }
-    if (a->profile != b->profile || a->mute != b->mute) {
-        return 0u;
-    }
-    if (a->profile == RS_PANEL_SOUND_CUSTOM) {
-        return (a->on_ms == b->on_ms && a->off_ms == b->off_ms &&
-                a->pulses == b->pulses && a->repeat_ms == b->repeat_ms) ? 1u : 0u;
-    }
-    return 1u;
-}
-
-static void rs_apply_sound(const RsPanelSoundCmd *cmd)
-{
-    if (RsPanelV3Slave_IsV3Active() != 0u) {
-        return;
-    }
-    if (Beeper_IsTestMode() != 0u) {
-        return;
-    }
-    if (cmd == 0) {
-        return;
-    }
-
-    /* Повтор той же команды не рестартует дежурный паттерн (иначе бип каждые ~1 с).
-     * BTN_ACK всегда проигрываем. */
-    if (cmd->profile != RS_PANEL_SOUND_BTN_ACK &&
-        s_last_sound_valid != 0u &&
-        rs_sound_cmd_same(cmd, &s_last_sound_cmd) != 0u) {
-        return;
-    }
-
-    PanelHostCache_ApplySoundState((cmd->mute == 0u) ? 1u : 0u,
-                                   PanelHostCache_Get()->beep_block);
-    if (cmd->mute != 0u) {
-        Beeper_AllOff();
-        s_last_sound_cmd = *cmd;
-        s_last_sound_valid = 1u;
-        return;
-    }
-
-    switch (cmd->profile) {
-    case RS_PANEL_SOUND_OFF:
-        /* Полный стоп: иначе при OFF во время BTN_ACK resume вернёт START_ALL_HOLD. */
-        Beeper_AllOff();
-        break;
-    case RS_PANEL_SOUND_FAULT:
-        Beeper_StartPulseTrain(BEEPER_PATTERN_FAULT_ON_MS,
-                               BEEPER_PATTERN_FAULT_OFF_MS,
-                               BEEPER_PATTERN_FAULT_PULSES,
-                               BEEPER_PATTERN_FAULT_REPEAT_MS);
-        break;
-    case RS_PANEL_SOUND_ATTN:
-        Beeper_StartPulseTrain(SOUND_ATTN_DUTY_ON_MS,
-                               SOUND_ATTN_DUTY_OFF_MS,
-                               SOUND_ATTN_DUTY_PULSES,
-                               SOUND_ATTN_DUTY_REPEAT_MS);
-        break;
-    case RS_PANEL_SOUND_FIRE:
-        Beeper_FireAlarmOn();
-        break;
-    case RS_PANEL_SOUND_FIRE1:
-        Beeper_StartPulseTrain(SOUND_FIRE1_DUTY_ON_MS,
-                               SOUND_FIRE1_DUTY_OFF_MS,
-                               SOUND_FIRE1_DUTY_PULSES,
-                               SOUND_FIRE1_DUTY_REPEAT_MS);
-        break;
-    case RS_PANEL_SOUND_START:
-        Beeper_StartPulseTrain(BEEPER_PATTERN_START_ON_MS,
-                               BEEPER_PATTERN_START_OFF_MS,
-                               BEEPER_PATTERN_START_PULSES,
-                               BEEPER_PATTERN_START_REPEAT_MS);
-        break;
-    case RS_PANEL_SOUND_START_ALL_HOLD:
-        Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
-                               SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
-                               1u,
-                               SOUND_START_ALL_HOLD_PERIOD_MS);
-        break;
-    case RS_PANEL_SOUND_BTN_ACK:
-        Beeper_ButtonAcknowledge();
-        break;
-    case RS_PANEL_SOUND_CUSTOM:
-        Beeper_StartPulseTrain(cmd->on_ms, cmd->off_ms, cmd->pulses, cmd->repeat_ms);
-        break;
-    default:
-        break;
-    }
-
-    if (cmd->profile != RS_PANEL_SOUND_BTN_ACK) {
-        s_last_sound_cmd = *cmd;
-        s_last_sound_valid = 1u;
-    }
-}
-
-static void rs_apply_datetime(const RsPanelTimeCmd *cmd)
-{
-    RTC_TimeTypeDef time = {0};
-    RTC_DateTypeDef date = {0};
-
-    if (cmd == 0) {
-        return;
-    }
-
-    time.Hours = rs_bcd_from_bin(cmd->hour);
-    time.Minutes = rs_bcd_from_bin(cmd->min);
-    time.Seconds = rs_bcd_from_bin(cmd->sec);
-    date.Year = rs_bcd_from_bin(cmd->year);
-    date.Month = rs_bcd_from_bin(cmd->month);
-    date.Date = rs_bcd_from_bin(cmd->day);
-    date.WeekDay = RTC_WEEKDAY_MONDAY;
-
-    (void)HAL_RTC_SetTime(&hrtc, &time, RTC_FORMAT_BCD);
-    (void)HAL_RTC_SetDate(&hrtc, &date, RTC_FORMAT_BCD);
-    RtcCache_Refresh();
-}
-
-static void rs_sync_status_leds(uint8_t warn_active, uint8_t warn_has_fault, uint8_t fire_active)
-{
-    /* Экран WARN/FIRE — источник истины для NORM/ERR, если CMD_LED от хоста
-     * не дошёл или ушёл со старым NORM=ON в том же тике. */
-    if (fire_active != 0u || warn_active != 0u) {
-        Led_Set(LED_NORM, 0u);
-    } else {
-        Led_Set(LED_NORM, 1u);
-    }
-
-    /* Сброс пожара (MAIN_FIRE active=0): погасить ПОЖАР/ПУСК/ОСТ.ПУСК даже если
-     * CMD_LED с OFF потерялся. ВНИМАНИЕ хост вернёт следующим CMD_LED. */
-    if (fire_active == 0u) {
-        Led_Set(LED_FIRE, 0u);
-        Led_Set(LED_START, 0u);
-        Led_Set(LED_STOP, 0u);
-    } else {
-        /* Пожар на UI есть, а CMD_LED мог потеряться (SOUND/POLL busy):
-         * зажечь ПОЖАР по MAIN_FIRE. Дальше CMD_LED выставит BLINK/BRIGHT. */
-        Led_Set(LED_FIRE, 1u);
-        Led_SetBrightness(LED_FIRE, LED_STATUS_MAX_BRIGHTNESS);
-        Led_ForceStatusBright(LED_FIRE);
-    }
-
-    if (warn_has_fault != 0u) {
-        Led_Set(LED_ERR, 1u);
-        Led_ForceStatusBright(LED_ERR);
-    } else {
-        Led_Set(LED_ERR, 0u);
-    }
-}
-
-static void rs_apply_main_fire(PanelStateContext *state, const uint8_t *payload, uint16_t len)
-{
-    uint16_t pos = 0u;
-    uint8_t active;
-    uint8_t mode;
-    uint8_t remaining_s;
-    uint8_t n_zones;
-    uint8_t i;
-    uint8_t parsed = 0u;
-    uint8_t use_per_zone = 0u;
-    char zone_names[16][ZONE_NAME_SIZE + 1];
-    uint8_t zone_modes[16];
-    uint8_t zone_remaining[16];
-
-    if (state == 0 || payload == 0 || len < 5u) {
-        return;
-    }
-
-    memset(zone_names, 0, sizeof(zone_names));
-    memset(zone_modes, 0, sizeof(zone_modes));
-    memset(zone_remaining, 0, sizeof(zone_remaining));
-    active = (uint8_t)(payload[pos++] & 0x01u);
-    state->fire_active = active;
-    mode = payload[pos++];
-    remaining_s = payload[pos++];
-    pos++; /* sel_index: выбор зоны ведёт панель через FIRE_SELECT */
-    n_zones = payload[pos++];
-    if (n_zones > 16u) {
-        n_zones = 16u;
-    }
-    {
-        uint16_t p_new = pos;
-        uint8_t i2;
-        uint8_t ok_new = 1u;
-        for (i2 = 0u; i2 < n_zones; i2++) {
-            uint8_t sl;
-            if (p_new >= len) {
-                ok_new = 0u;
-                break;
-            }
-            sl = payload[p_new++];
-            if ((uint16_t)(p_new + sl + 2u) > len) {
-                ok_new = 0u;
-                break;
-            }
-            p_new = (uint16_t)(p_new + sl + 2u);
-        }
-        if (ok_new != 0u && p_new == len) {
-            use_per_zone = 1u;
-        }
-    }
-    for (i = 0u; i < n_zones; i++) {
-        uint8_t str_len;
-        uint8_t raw_len;
-        if (pos >= len) {
-            break;
-        }
-        raw_len = payload[pos++];
-        str_len = raw_len;
-        if ((uint16_t)(pos + raw_len) > len) {
-            break;
-        }
-        if (str_len > ZONE_NAME_SIZE) {
-            str_len = ZONE_NAME_SIZE;
-        }
-        memcpy(zone_names[i], &payload[pos], str_len);
-        zone_names[i][str_len] = '\0';
-        pos = (uint16_t)(pos + raw_len);
-        if (use_per_zone != 0u && (uint16_t)(pos + 2u) <= len) {
-            zone_modes[i] = payload[pos++];
-            zone_remaining[i] = payload[pos++];
-        } else {
-            zone_modes[i] = mode;
-            zone_remaining[i] = remaining_s;
-        }
-        parsed++;
-    }
-    n_zones = parsed;
-
-    /* Hold ПУСК ОБЩИЙ из IDLE: MAIN_FIRE active=1 (таймер), но FSM на хосте IDLE —
-     * CMD_LED держит NORM/ERR. Не трогать статусные LED из hold-кадра: иначе
-     * гаснет НОРМА / вспыхивает неисправность при частых MAIN_FIRE. */
-    {
-        uint8_t prev_hold = s_fire_hold_idle;
-        s_fire_hold_idle = (active != 0u && mode == 1u && n_zones == 0u) ? 1u : 0u;
-        if (s_fire_hold_idle == 0u) {
-            rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault, active);
-        }
-        /* Отпускание hold: вернуть дежурную подсветку ПУСК ОБЩИЙ, если CMD_LED потерялся
-         * в фазе blink_off. */
-        if (prev_hold != 0u && s_fire_hold_idle == 0u && active == 0u) {
-            Led_Set(LED_BUT_START_ALL, 0u);
-            Led_Set(LED_STR_START_ALL, 1u);
-            Led_SetBrightness(LED_BUT_START_ALL, LED_BUT_DIM_BRIGHTNESS);
-            Led_SetBrightness(LED_STR_START_ALL, LED_BUT_DIM_BRIGHTNESS);
-        }
-    }
-    rs_queue_fire_ui(active, mode, remaining_s, n_zones, zone_names, zone_modes, zone_remaining);
-}
-
-static void rs_apply_main_warn(PanelStateContext *state, const uint8_t *payload, uint16_t len)
-{
-    uint16_t pos = 0u;
-    uint8_t count;
-    uint8_t n_items;
-    uint8_t i;
-
-    if (state == 0 || payload == 0 || len < 5u) {
-        return;
-    }
-
-    memset(state->warning_titles, 0, sizeof(state->warning_titles));
-    memset(state->warning_details, 0, sizeof(state->warning_details));
-
-    count = payload[pos++];
-    pos++;      /* ver */
-    pos += 2u;  /* crc16 */
-    n_items = payload[pos++];
-    if (n_items > PANEL_STATE_MAX_WARN_ITEMS) {
-        n_items = PANEL_STATE_MAX_WARN_ITEMS;
-    }
-
-    for (i = 0u; i < n_items && pos < len; i++) {
-        uint8_t title_len;
-        uint8_t detail_len;
-
-        pos++; /* flags */
-        if (pos >= len) {
-            break;
-        }
-        title_len = payload[pos++];
-        if ((uint16_t)(pos + title_len) > len) {
-            break;
-        }
-        if (title_len > 23u) {
-            title_len = 23u;
-        }
-        memcpy(state->warning_titles[i], &payload[pos], title_len);
-        state->warning_titles[i][title_len] = '\0';
-        pos = (uint16_t)(pos + payload[pos - 1u]);
-
-        if (pos >= len) {
-            break;
-        }
-        detail_len = payload[pos++];
-        if ((uint16_t)(pos + detail_len) > len) {
-            break;
-        }
-        if (detail_len > ZONE_NAME_SIZE) {
-            detail_len = ZONE_NAME_SIZE;
-        }
-        memcpy(state->warning_details[i], &payload[pos], detail_len);
-        state->warning_details[i][detail_len] = '\0';
-        pos = (uint16_t)(pos + payload[pos - 1u]);
-    }
-
-    g_rs_panel_dbg.last_warn_active = ((count != 0u) && (i != 0u)) ? 1u : 0u;
-    g_rs_panel_dbg.last_warn_n_items = i;
-    g_rs_panel_dbg.host_warn_data_rx++;
-
-    {
-        uint8_t has_fault = 0u;
-        uint8_t j;
-        for (j = 0u; j < i; j++) {
-            /* ВНИМАНИЕ: title[0]==0x01; неисправность — без маркера. */
-            if (state->warning_titles[j][0] != (char)PANEL_WARN_TITLE_MARK_ATTN) {
-                has_fault = 1u;
-                break;
-            }
-        }
-        const uint8_t prev_has_fault = s_warn_ui_has_fault;
-        s_warn_ui_active = g_rs_panel_dbg.last_warn_active;
-        s_warn_ui_has_fault = (g_rs_panel_dbg.last_warn_active != 0u) ? has_fault : 0u;
-        rs_sync_status_leds(s_warn_ui_active, s_warn_ui_has_fault,
-                            (s_fire_hold_idle != 0u) ? 0u : state->fire_active);
-        /* Новая неисправность (не ВНИМАНИЕ) — на MAIN с меню/теста. */
-        if (s_warn_ui_has_fault != 0u && prev_has_fault == 0u) {
-            if (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u) {
-                RsPanelEndpoint_QueueGotoMain();
-            }
-        }
-    }
-
-    rs_queue_warn_ui(g_rs_panel_dbg.last_warn_active,
-                     i,
-                     state->warning_titles,
-                     state->warning_details);
-}
-
-static void rs_apply_ui_data(PanelStateContext *state, const uint8_t *payload, uint16_t len)
-{
-    if (state == 0 || payload == 0 || len == 0u) {
-        return;
-    }
-
-    g_rs_panel_dbg.last_ui_data_sub_id = payload[0];
-
-    switch (payload[0]) {
-    case RS_PANEL_UI_DATA_MAIN_FIRE:
-        rs_apply_main_fire(state, &payload[1], (uint16_t)(len - 1u));
-        break;
-    case RS_PANEL_UI_DATA_MAIN_WARN:
-        rs_apply_main_warn(state, &payload[1], (uint16_t)(len - 1u));
-        break;
-    case RS_PANEL_UI_DATA_DATETIME:
-        {
-            RsPanelTimeCmd time_cmd;
-            if (rs_decode_time_cmd(&payload[1], (uint16_t)(len - 1u), &time_cmd)) {
-                rs_apply_datetime(&time_cmd);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_CONNECTION_STATUS:
-        /* [selected_idx][wifi_blocked][esp_enabled][online][host_connected][session?][wifi_on?][rs485_on?] */
-        if (len >= 6u) {
-            MenuUi_SetConnectionSelected(payload[1]);
-            MenuUi_SetWifiBlocked(payload[2]);
-            Esp32_SetEnabled(payload[3]);
-            {
-                uint8_t session = (len >= 7u) ? payload[6] : ((payload[5] != 0u) ? 1u : 0u);
-                PanelEspManager_SetRemoteStatus(payload[3], payload[4], payload[5], session);
-            }
-            if (len >= 9u) {
-                PanelConnectionCache_SetRemoteStatus(payload[7], payload[8]);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_CONFIG_STATUS:
-        /* [state][percent] */
-        if (len >= 3u) {
-            MenuConfig_SetRemoteStatus((MenuCfgState)payload[1], payload[2]);
-        }
-        break;
-    case RS_PANEL_UI_DATA_MENU_LIST:
-        {
-            /* selected u16 + n_items u8 + items[] (len u8 + utf8[len]) */
-            if (len < 1u + 2u + 1u) {
-                break;
-            }
-            const uint8_t *p = &payload[1];
-            uint16_t selected = rs_get_u16le(&p[0]);
-            uint8_t n_items = p[2];
-
-            /* selected can be out of bounds for this panel;
-             * clamp later in ScreenMenuPresenter if needed. */
-            MenuUi_SetMenuSelected(selected);
-            MenuUi_SetMenuNItems(n_items);
-
-            /* Skip items payload to validate frame bounds. */
-            uint16_t pos = (uint16_t)(2u + 1u);
-            uint16_t max_pos = (uint16_t)(len - 1u);
-            for (uint8_t i = 0u; i < n_items; i++) {
-                if (pos >= max_pos) {
-                    break;
-                }
-                uint8_t slen = p[pos];
-                pos++;
-                if ((uint16_t)(pos + slen) > max_pos) {
-                    break;
-                }
-                pos = (uint16_t)(pos + slen);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_MENU_VALUE:
-        /* [item_id u8][value u8] */
-        if (len >= 3u) {
-            uint8_t item_id = payload[1];
-            uint8_t value = payload[2];
-            if (item_id == 0u) {
-                MenuUi_SetFireModeValue(value);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_MENU_TOGGLE:
-        /* [item_id u8][value u8][blocked u8] */
-        if (len >= 4u) {
-            uint8_t item_id = payload[1];
-            uint8_t value = payload[2];
-            uint8_t blocked = payload[3];
-            if (item_id == 1u) {
-                PanelHostCache_ApplySoundState(value, blocked);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_DEVICE_LIST:
-        /* [selected_slot u8][count u8][items[count*4]] [zone_name_len u8][zone_name] */
-        if (len >= 4u) {
-            uint8_t selected_slot = payload[1];
-            uint8_t count = payload[2];
-            uint16_t items_bytes = (uint16_t)count * 4u;
-            if ((uint16_t)(3u + items_bytes + 1u) <= len) {
-                uint8_t zone_name_len = payload[3u + items_bytes];
-                const uint8_t *zone_name = &payload[3u + items_bytes + 1u];
-                if ((uint16_t)(4u + items_bytes + zone_name_len) <= len) {
-                    PanelDeviceCache_SetList(selected_slot,
-                                             count,
-                                             &payload[3],
-                                             items_bytes,
-                                             zone_name,
-                                             zone_name_len);
-                }
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_DEVICE_DETAIL:
-        /* [slot][zone][d_type][h_adr][uid0 u32][uid1 u32][uid2 u32][zone_name_len][zone_name] */
-        if (len >= 18u) {
-            uint8_t slot = payload[1];
-            uint8_t zone = payload[2];
-            uint8_t d_type = payload[3];
-            uint8_t h_adr = payload[4];
-            uint32_t uid0 = rs_get_u32le(&payload[5]);
-            uint32_t uid1 = rs_get_u32le(&payload[9]);
-            uint32_t uid2 = rs_get_u32le(&payload[13]);
-            uint8_t zone_name_len = payload[17];
-            const uint8_t *zone_name = (len > 18u) ? &payload[18] : 0;
-            if ((uint16_t)(18u + zone_name_len) <= len) {
-                PanelDeviceCache_SetDetail(slot,
-                                           zone,
-                                           d_type,
-                                           h_adr,
-                                           uid0,
-                                           uid1,
-                                           uid2,
-                                           zone_name,
-                                           zone_name_len);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_ZONE_MODE_LIST:
-        /* [selected_zone_idx u8][count u8][items[count*(zone_idx,mode,name_len,name...)]] */
-        if (len >= 3u) {
-            uint8_t selected_zone_idx = payload[1];
-            uint8_t count = payload[2];
-            PanelZoneModeCache_SetList(selected_zone_idx,
-                                       count,
-                                       &payload[3],
-                                       (uint16_t)(len - 3u));
-        }
-        break;
-    case RS_PANEL_UI_DATA_MENU_SELF_TEST:
-        PanelUiBridge_StartIndicationTest();
-        break;
-    case RS_PANEL_UI_DATA_JOURNAL_LIST:
-        {
-            if (len < 1u + 13u) {
-                break;
-            }
-            const uint8_t *p = &payload[1];
-            uint16_t pos = 0u;
-            uint32_t total = rs_get_u32le(&p[pos]);
-            pos += 4u;
-            uint32_t selected_idx = rs_get_u32le(&p[pos]);
-            pos += 4u;
-            uint32_t window_first = rs_get_u32le(&p[pos]);
-            pos += 4u;
-            uint8_t n_items = p[pos++];
-            uint16_t items_len = (uint16_t)(len - 1u - pos);
-            if (n_items != 0u && items_len != 0u) {
-                PanelJournalCache_SetList(total, selected_idx, window_first, n_items, &p[pos], items_len);
-            } else {
-                PanelJournalCache_SetList(total, selected_idx, window_first, 0u, 0, 0u);
-            }
-        }
-        break;
-    case RS_PANEL_UI_DATA_JOURNAL_DETAIL:
-        {
-            /* rec_idx u32 + ts u32 + code u16 + text_len u16 */
-            if (len < 1u + 4u + 4u + 2u + 2u) {
-                break;
-            }
-            const uint8_t *p = &payload[1];
-            uint16_t pos = 0u;
-            uint32_t rec_idx = rs_get_u32le(&p[pos]);
-            pos += 4u;
-            uint32_t ts = rs_get_u32le(&p[pos]);
-            pos += 4u;
-            uint16_t code = rs_get_u16le(&p[pos]);
-            pos += 2u;
-            uint16_t text_len = rs_get_u16le(&p[pos]);
-            pos += 2u;
-
-            if ((uint16_t)(pos + text_len) > (uint16_t)(len - 1u)) {
-                break;
-            }
-
-            PanelJournalCache_SetDetail(rec_idx, ts, code, &p[pos], text_len);
-        }
-        break;
-    default:
-        break;
-    }
-}
-
 static void rs_send_caps(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq)
 {
     uint8_t payload[64];
@@ -1071,22 +412,6 @@ static void rs_send_ack(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq, ui
     uint8_t payload[1];
     payload[0] = ack_seq;
     rs_bus_send_frame(endpoint, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_ACK, payload, sizeof(payload));
-}
-
-static void rs_send_poll_rsp(RsPanelEndpoint *endpoint, uint8_t addr, uint8_t seq)
-{
-    RsPanelPollRsp rsp;
-    /* status+counts + 16×btn(3) + 16×ui(5) ≈ 131 B; запас под рост. */
-    uint8_t payload[160];
-    uint16_t payload_len;
-
-    PanelState_FillPollResponse(&endpoint->state, &rsp);
-    payload_len = rs_encode_poll_rsp(payload, sizeof(payload), &rsp);
-    if (payload_len == 0u) {
-        return;
-    }
-    RsPanelDebug_OnPollRsp(rsp.ui_evt_count, rsp.evt_count);
-    rs_bus_send_frame(endpoint, addr, seq, RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL, payload, payload_len);
 }
 
 static void rs_send_activity(RsPanelEndpoint *endpoint)
@@ -1215,63 +540,11 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
     }
 
     RsPanelDebug_OnHostFrame(frame->cmd, frame->seq, frame->addr);
+    /* До OnPollStream/FAULT: снять lost, иначе push_faults_ui no-op. */
+    PanelLinkMonitor_OnHostRx();
     g_rs_panel_dbg.current_screen = endpoint->state.current_screen;
 
     endpoint->state.last_host_seq = frame->seq;
-
-    if ((frame->flags & RS_BUS_FLAG_FRAG) != 0u) {
-        uint8_t frag_id;
-        uint8_t frag_idx;
-        uint8_t frag_total;
-        uint16_t chunk_len;
-
-        if (frame->payload_len < 3u) {
-            rs_frag_reset(endpoint);
-            return;
-        }
-
-        frag_id = frame->payload[0];
-        frag_idx = frame->payload[1];
-        frag_total = frame->payload[2];
-        chunk_len = (uint16_t)(frame->payload_len - 3u);
-
-        if (frag_total == 0u || frag_idx >= frag_total) {
-            rs_frag_reset(endpoint);
-            return;
-        }
-
-        if (frag_idx == 0u) {
-            endpoint->frag_active = 1u;
-            endpoint->frag_id = frag_id;
-            endpoint->frag_next_idx = 0u;
-            endpoint->frag_total = frag_total;
-            endpoint->frag_len = 0u;
-        }
-
-        if (endpoint->frag_active == 0u ||
-            endpoint->frag_id != frag_id ||
-            endpoint->frag_total != frag_total ||
-            endpoint->frag_next_idx != frag_idx ||
-            (uint32_t)endpoint->frag_len + chunk_len > sizeof(endpoint->frag_buf)) {
-            rs_frag_reset(endpoint);
-            return;
-        }
-
-        if (chunk_len != 0u) {
-            memcpy(&endpoint->frag_buf[endpoint->frag_len], &frame->payload[3], chunk_len);
-            endpoint->frag_len = (uint16_t)(endpoint->frag_len + chunk_len);
-        }
-        endpoint->frag_next_idx++;
-
-        if (frag_idx + 1u == frag_total) {
-            rs_apply_ui_data(&endpoint->state, endpoint->frag_buf, endpoint->frag_len);
-            rs_frag_reset(endpoint);
-            if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
-                rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-            }
-        }
-        return;
-    }
 
     switch (frame->cmd) {
     case RS_PANEL_CMD_CAPS_REQ:
@@ -1279,73 +552,24 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         break;
     case RS_PANEL_CMD_POLL:
         {
-            /* v3 payload: ver=0x03 … ; иначе legacy PollReq. */
-            if (frame->payload_len > 0u && frame->payload != 0 &&
-                frame->payload[0] == RS_PANEL_V3_VERSION) {
-                /* ВАЖНО: этот путь в UART RX IDLE IRQ. OnPoll тяжёлый (RTC/UI).
-                 * Раньше: OnPoll→BuildRsp→TX — ответ уходил после десятков мс,
-                 * master (quiet 25 мс) уже слал следующий POLL → коллизия,
-                 * на ППКУ rx без 0xA5. Сначала короткий RSP, потом apply. */
-                uint8_t payload[96];
-                uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
-                if (plen > 0u) {
-                    RsPanelDebug_OnPollRsp(0u, 0u);
-                    rs_bus_send_frame(endpoint, endpoint->panel_addr,
-                                      endpoint->next_tx_seq++,
-                                      RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
-                                      payload, plen);
-                }
-                (void)RsPanelV3Slave_OnPoll(frame->payload, frame->payload_len);
-            } else {
-                RsPanelPollReq req;
-                if (rs_decode_poll_req(frame->payload, frame->payload_len, &req)) {
-                    (void)req;
-                    rs_send_poll_rsp(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++);
-                }
+            if (frame->payload_len == 0u || frame->payload == 0 ||
+                frame->payload[0] != RS_PANEL_V3_VERSION) {
+                break; /* только v3 POLL */
             }
-        }
-        break;
-    case RS_PANEL_CMD_LED:
-        {
-            RsPanelLedCmd led_cmd;
-            if (rs_decode_led_cmd(frame->payload, frame->payload_len, &led_cmd)) {
-                rs_apply_leds(&led_cmd);
+            /* UART RX IDLE IRQ: короткий RSP сразу, ACK полос сразу,
+             * ZONES/TIME/RTC — в Timer10ms / ProcessDeferredUi. */
+            uint8_t payload[96];
+            uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+            if (plen > 0u) {
+                RsPanelDebug_OnPollRsp(0u, 0u);
+                rs_bus_send_frame(endpoint, endpoint->panel_addr,
+                                  endpoint->next_tx_seq++,
+                                  RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
+                                  payload, plen);
             }
-        }
-        if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
-            rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-        }
-        break;
-    case RS_PANEL_CMD_SOUND:
-        {
-            RsPanelSoundCmd sound_cmd;
-            if (rs_decode_sound_cmd(frame->payload, frame->payload_len, &sound_cmd)) {
-                rs_apply_sound(&sound_cmd);
-            }
-        }
-        if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
-            rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-        }
-        break;
-    case RS_PANEL_CMD_UI_NAV:
-        /* Legacy: мастер вёл экраны «глупой» панели. Сейчас UI свой (TouchGFX) —
-         * кадр игнорируем (не GotoScreen), ACK если просили. */
-        if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
-            rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-        }
-        break;
-    case RS_PANEL_CMD_UI_DATA:
-        rs_apply_ui_data(&endpoint->state, frame->payload, frame->payload_len);
-        if ((frame->flags & RS_BUS_FLAG_ACK_REQ) != 0u) {
-            rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
-        }
-        break;
-    case RS_PANEL_CMD_TIME:
-        {
-            RsPanelTimeCmd time_cmd;
-            if (rs_decode_time_cmd(frame->payload, frame->payload_len, &time_cmd)) {
-                rs_apply_datetime(&time_cmd);
-            }
+            (void)RsPanelV3Slave_OnPollAcks(frame->payload, frame->payload_len);
+            (void)RsPanelV3Slave_OnPollStream(frame->payload, frame->payload_len);
+            rs_poll_body_enqueue(frame->payload, frame->payload_len);
         }
         break;
     case RS_PANEL_CMD_PROFILE_SET:
@@ -1420,6 +644,8 @@ void RsPanelEndpoint_Timer10ms(void)
 {
     /* FE/ORE без ErrorCallback оставляли RX мёртвым — сторож поднимает DMA. */
     RsBus_RxWatchdog(&g_endpoint.bus);
+    /* v3 POLL body (ZONES/TIME) — не в UART IRQ; UI fire/warn — отдельно ниже. */
+    rs_poll_body_drain();
     /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
      * иначе WARN попадает в уничтожаемый view, а setupScreen снова рисует «НОРМА». */
     PanelUpd_Timer10ms();
@@ -1434,6 +660,9 @@ void RsPanelEndpoint_Timer10ms(void)
     }
     PanelState_SampleButtons(&g_endpoint.state);
     RsPanelV3Slave_DrainPanelState(&g_endpoint.state);
+    /* Monitor до Slave: иначе push_faults_ui в том же тике видит IsLost=1
+     * и quiet-timer крутит dirty без смены WARN («НЕТ СВЯЗИ» залипает). */
+    PanelLinkMonitor_Timer10ms();
     RsPanelV3Slave_Timer10ms();
     /* CAPS только по CAPS_REQ / PROFILE_SET — без незапрошенного TX. */
     (void)PanelState_TakeCapsResyncPending(&g_endpoint.state);
@@ -1445,7 +674,6 @@ void RsPanelEndpoint_Timer10ms(void)
     g_rs_panel_dbg.rx_last_err_code = g_endpoint.bus.rx_last_err_code;
     g_rs_panel_dbg.rx_rearm_wd = g_endpoint.bus.rx_rearm_wd;
     g_rs_panel_dbg.panel_addr = g_endpoint.panel_addr;
-    PanelLinkMonitor_Timer10ms();
     g_activity_accum_ms += 10u;
     if (g_activity_accum_ms >= 1000u) {
         g_activity_accum_ms = 0u;

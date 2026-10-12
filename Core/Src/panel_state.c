@@ -301,7 +301,6 @@ void PanelState_Init(PanelStateContext *ctx)
     memset(ctx, 0, sizeof(*ctx));
     panel_state_fill_caps(ctx);
     ctx->current_screen = RS_PANEL_SCREEN_LOGO;
-    ctx->fire_active = 0u;
 }
 
 void PanelState_QueueUiEvent(uint8_t evt_type, uint16_t p1, uint16_t p2)
@@ -423,9 +422,6 @@ void PanelState_ResetUi(PanelStateContext *ctx)
         return;
     }
     ctx->current_screen = RS_PANEL_SCREEN_LOGO;
-    ctx->fire_active = 0u;
-    memset(ctx->warning_titles, 0, sizeof(ctx->warning_titles));
-    memset(ctx->warning_details, 0, sizeof(ctx->warning_details));
     ctx->pending_btn_count = 0u;
     ctx->pending_ui_count = 0u;
 }
@@ -566,9 +562,7 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
             if (state == (uint8_t)ButtonStatePress) {
                 const uint8_t on_main_screen = (MenuUi_IsMainScreenActive() != 0u);
                 const uint8_t fire_blocks_menu =
-                    (ctx->fire_active != 0u) ||
-                    (RsPanelV3Slave_IsV3Active() != 0u &&
-                     RsPanelV3Slave_IsFireActive() != 0u);
+                    (RsPanelV3Slave_IsFireActive() != 0u) ? 1u : 0u;
                 const uint8_t is_main_enter =
                     (on_main_screen != 0u && btn == BUT_ENTER && fire_blocks_menu == 0u);
                 const uint8_t is_menu_root = panel_state_is_remote_menu_root_button(screen, btn);
@@ -602,60 +596,3 @@ void PanelState_SampleButtons(PanelStateContext *ctx)
     }
 }
 
-void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp)
-{
-    static const uint8_t level_btns[] = { BUT_FORCE, BUT_FIRE, BUT_STOP };
-    uint8_t bi;
-
-    if (ctx == 0 || rsp == 0) {
-        return;
-    }
-    memset(rsp, 0, sizeof(*rsp));
-    rsp->status = ctx->caps.status;
-    rsp->evt_count = ctx->pending_btn_count;
-    memcpy(rsp->btn_events, ctx->pending_btn, (size_t)ctx->pending_btn_count * sizeof(ctx->pending_btn[0]));
-    rsp->ui_evt_count = ctx->pending_ui_count;
-    memcpy(rsp->ui_events, ctx->pending_ui, (size_t)ctx->pending_ui_count * sizeof(ctx->pending_ui[0]));
-    ctx->pending_btn_count = 0u;
-    ctx->pending_ui_count = 0u;
-
-    /* Абсолютный level пусковых кнопок в каждом POLL — живой Button_GetState.
-     * Не перезаписываем уже лежащий в pending edge (Press): иначе POLL до
-     * следующего Button_Process может обнулить только что зафиксированное нажатие. */
-    for (bi = 0u; bi < (uint8_t)(sizeof(level_btns) / sizeof(level_btns[0])); bi++) {
-        uint8_t btn = level_btns[bi];
-        uint8_t type;
-        uint8_t state;
-        uint8_t level;
-        uint8_t already = 0u;
-        uint8_t ei;
-
-        if (PANEL_TYPE_IS_SMALL(PanelCfg_Get()->panel_type) && btn == BUT_FORCE) {
-            continue;
-        }
-        type = panel_state_btn_type(btn);
-        if (type == 0u) {
-            continue;
-        }
-        for (ei = 0u; ei < rsp->evt_count && ei < RS_PANEL_MAX_POLL_BTN_EVENTS; ei++) {
-            if (rsp->btn_events[ei].type == type) {
-                already = 1u;
-                break;
-            }
-        }
-        if (already != 0u) {
-            continue;
-        }
-        state = (uint8_t)Button_GetState(btn);
-        level = (state == (uint8_t)ButtonStateReset || state == (uint8_t)ButtonStateError) ? 0u : 1u;
-        ctx->btn_prev_state[btn] = state;
-        ctx->btn_prev_level[btn] = level;
-        if (rsp->evt_count >= RS_PANEL_MAX_POLL_BTN_EVENTS) {
-            break;
-        }
-        rsp->btn_events[rsp->evt_count].type = type;
-        rsp->btn_events[rsp->evt_count].state = state;
-        rsp->btn_events[rsp->evt_count].level = level;
-        rsp->evt_count++;
-    }
-}

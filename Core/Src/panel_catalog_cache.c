@@ -35,7 +35,9 @@ uint8_t PanelCatalog_FlashRead(PanelCatalogBlob *out)
 
 void PanelCatalog_FlashWrite(const PanelCatalogBlob *blob)
 {
-	__attribute__((aligned(16))) uint8_t buf[PANEL_FLASH_CATALOG_BYTES];
+	/* НЕ на стеке: PANEL_FLASH_CATALOG_BYTES=8K, а _Min_Stack_Size=4K.
+	 * После сходимости каталога quiet-save ронял стек → паузы OnRsp на шине. */
+	static __attribute__((aligned(16))) uint8_t s_flash_buf[PANEL_FLASH_CATALOG_BYTES];
 	uint32_t *hdr;
 	uint32_t total;
 	uint32_t n_quad;
@@ -50,11 +52,11 @@ void PanelCatalog_FlashWrite(const PanelCatalogBlob *blob)
 		return;
 	}
 
-	memset(buf, 0xFFu, sizeof(buf));
-	hdr = (uint32_t *)buf;
+	memset(s_flash_buf, 0xFFu, sizeof(s_flash_buf));
+	hdr = (uint32_t *)s_flash_buf;
 	hdr[0] = PANEL_CATALOG_MAGIC;
 	hdr[1] = (uint32_t)sizeof(PanelCatalogBlob);
-	memcpy(buf + PANEL_CATALOG_HEADER_SIZE, blob, sizeof(PanelCatalogBlob));
+	memcpy(s_flash_buf + PANEL_CATALOG_HEADER_SIZE, blob, sizeof(PanelCatalogBlob));
 
 	total = PANEL_CATALOG_HEADER_SIZE + (uint32_t)sizeof(PanelCatalogBlob);
 	n_quad = (total + QUADWORD_SIZE - 1u) / QUADWORD_SIZE;
@@ -84,7 +86,7 @@ void PanelCatalog_FlashWrite(const PanelCatalogBlob *blob)
 #endif
 	for (i = 0u; i < n_quad && st == HAL_OK; i++) {
 		uint32_t addr = PANEL_FLASH_CATALOG_ADDR_SYM + i * QUADWORD_SIZE;
-		st = HAL_FLASH_Program(prog_type, addr, (uint32_t)(buf + i * QUADWORD_SIZE));
+		st = HAL_FLASH_Program(prog_type, addr, (uint32_t)(s_flash_buf + i * QUADWORD_SIZE));
 	}
 	(void)HAL_FLASH_Lock();
 }

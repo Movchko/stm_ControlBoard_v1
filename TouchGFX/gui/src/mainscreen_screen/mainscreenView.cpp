@@ -150,13 +150,72 @@ static uint8_t fire_zone_remaining_at(uint8_t idx)
 	return 0u;
 }
 
+static void ui_set_warning_header_visible(mainscreenView *view, bool visible);
+
+/* Шапка ДО ПУСКА/ПАУЗА из того же mode, что и центр — без лага ui_show_desired. */
+static void fire_sync_top_header(mainscreenView *view, uint8_t hdr_mode, uint8_t cur_idx)
+{
+	if (view == nullptr) {
+		return;
+	}
+#if GOST_MODE
+	const bool multi = (s_fn_n > 1u);
+	const bool show_hdr = (multi || hdr_mode == 1u || hdr_mode == 5u ||
+			       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
+#else
+	const bool show_hdr = (hdr_mode == 1u || hdr_mode == 5u ||
+			       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
+#endif
+	ui_set_warning_header_visible(view, show_hdr);
+	char hdr[24];
+	const char *base = "";
+	if (hdr_mode == 1u) {
+		base = "ДО ПУСКА";
+	} else if (hdr_mode == 5u) {
+		base = "ПАУЗА";
+#if !GOST_MODE
+	} else if (s_manual_browse) {
+		base = "ПОЖАР";
+#endif
+	} else {
+#if GOST_MODE
+		base = "ПОЖАР";
+#else
+		base = "";
+#endif
+	}
+#if GOST_MODE
+	if (multi || s_manual_browse) {
+		if (base[0] != '\0') {
+			(void)snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
+				       (unsigned)(cur_idx + 1u), (unsigned)s_fn_n);
+			view->uiSetTopHeaderText(hdr);
+		}
+	} else if (hdr_mode == 1u || hdr_mode == 5u) {
+		view->uiSetTopHeaderText(base);
+	} else if (hdr_mode == 6u || hdr_mode == 8u) {
+		view->uiSetTopHeaderText("");
+	}
+#else
+	if (s_manual_browse && base[0] != '\0') {
+		(void)snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
+			       (unsigned)(cur_idx + 1u), (unsigned)s_fn_n);
+		view->uiSetTopHeaderText(hdr);
+	} else if (base[0] != '\0') {
+		view->uiSetTopHeaderText(base);
+	} else if (hdr_mode == 6u || hdr_mode == 8u) {
+		view->uiSetTopHeaderText("");
+	}
+#endif
+}
+
 static void fire_fill_center_text(uint8_t mode, uint8_t remaining_s, char *buf, size_t buf_sz)
 {
 	if (buf == nullptr || buf_sz == 0u) {
 		return;
 	}
 	if (mode == 1u || mode == 5u) {
-		(void)snprintf(buf, buf_sz, "%uСЕК.", (unsigned)remaining_s);
+		(void)snprintf(buf, buf_sz, "%u СЕК.", (unsigned)remaining_s);
 	} else if (mode == 2u) {
 		(void)snprintf(buf, buf_sz, "ТУШЕНИЕ");
 	} else if (mode == 3u) {
@@ -172,7 +231,7 @@ static void fire_fill_center_text(uint8_t mode, uint8_t remaining_s, char *buf, 
 	} else if (mode == 9u) {
 		(void)snprintf(buf, buf_sz, "ТУШ.ОСТ.");
 	} else if (remaining_s > 0u) {
-		(void)snprintf(buf, buf_sz, "%uСЕК.", (unsigned)remaining_s);
+		(void)snprintf(buf, buf_sz, "%u СЕК.", (unsigned)remaining_s);
 	} else {
 		buf[0] = '\0';
 	}
@@ -371,7 +430,7 @@ static void ui_show_desired(mainscreenView* view, bool force = false)
 	if (ui_is_start_all_hold()) {
 		const uint8_t rem = RsPanelV3Slave_GetHoldRemainingSec();
 		(void)std::snprintf(s_fire_center_text, sizeof(s_fire_center_text),
-				    "%uСЕК.", (unsigned)rem);
+				    "%u СЕК.", (unsigned)rem);
 		s_start_all_hold_shown = 1u;
 		view->uiShowStartAllHoldTimer(s_fire_center_text);
 		s_banner_mode = BANNER_NONE;
@@ -623,55 +682,14 @@ void mainscreenView::fireShowCurrentZone()
 		const uint8_t hdr_mode = fire_zone_mode_at(s_cur[BANNER_FIRE]);
 		fire_fill_center_text(hdr_mode, fire_zone_remaining_at(s_cur[BANNER_FIRE]),
 				      s_fire_center_text, sizeof(s_fire_center_text));
-		const bool multi = (s_fn_n > 1u);
-		const bool show_hdr = (multi || hdr_mode == 1u || hdr_mode == 5u ||
-				       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
-		ui_set_warning_header_visible(this, show_hdr);
-		char hdr[24];
-		const char *base = "";
-		if (hdr_mode == 1u) {
-			base = "ДО ПУСКА";
-		} else if (hdr_mode == 5u) {
-			base = "ПАУЗА";
-		} else {
-			base = "ПОЖАР";
-		}
-		if (multi || s_manual_browse) {
-			snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
-				 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
-			uiSetTopHeaderText(hdr);
-		} else if (hdr_mode == 1u || hdr_mode == 5u) {
-			uiSetTopHeaderText(base);
-		} else if (hdr_mode == 6u || hdr_mode == 8u) {
-			uiSetTopHeaderText("");
-		}
+		fire_sync_top_header(this, hdr_mode, s_cur[BANNER_FIRE]);
 	}
 #else
 	{
 		const uint8_t hdr_mode = fire_zone_mode_at(s_cur[BANNER_FIRE]);
 		fire_fill_center_text(hdr_mode, fire_zone_remaining_at(s_cur[BANNER_FIRE]),
 				      s_fire_center_text, sizeof(s_fire_center_text));
-		const bool show_hdr = (hdr_mode == 1u || hdr_mode == 5u ||
-				       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
-		ui_set_warning_header_visible(this, show_hdr);
-		char hdr[24];
-		const char *base = "";
-		if (hdr_mode == 1u) {
-			base = "ДО ПУСКА";
-		} else if (hdr_mode == 5u) {
-			base = "ПАУЗА";
-		} else if (s_manual_browse) {
-			base = "ПОЖАР";
-		}
-		if (s_manual_browse && base[0] != '\0') {
-			snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
-				 (unsigned)(s_cur[BANNER_FIRE] + 1u), (unsigned)s_fn_n);
-			uiSetTopHeaderText(hdr);
-		} else if (base[0] != '\0') {
-			uiSetTopHeaderText(base);
-		} else if (hdr_mode == 6u || hdr_mode == 8u) {
-			uiSetTopHeaderText("");
-		}
+		fire_sync_top_header(this, hdr_mode, s_cur[BANNER_FIRE]);
 	}
 #endif
 	{
@@ -986,7 +1004,7 @@ void mainscreenView::uiShowStartAllHoldTimer(const char* center_text)
 	ui_set_warning_header_visible(this, true);
 	uiSetTopHeaderText("ДО ПУСКА");
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
-	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "0СЕК.";
+	const char* txt = (center_text != nullptr && center_text[0] != '\0') ? center_text : "0 СЕК.";
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(txt), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 	textArea1.setWildcard(textArea1Buffer);
@@ -1140,11 +1158,12 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 			textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 			textArea1.setWildcard(textArea1Buffer);
 			textArea1.invalidate();
+			/* Шапка из того же zmode, что и центр (не ждать ui_show_desired). */
+			fire_sync_top_header(this, zmode, idx);
 		}
 	}
 #if GOST_MODE
-	/* Смена статуса текущей зоны (тушение/останов/…) — тоже новое сообщение на 5 с.
-	 * Force обязателен: иначе шапка ДО ПУСКА→ПАУЗА не обновляется (center уже «NСЕК.»). */
+	/* Смена статуса текущей зоны (тушение/останов/…) — тоже новое сообщение на 5 с. */
 	bool status_flash = false;
 	if (zone_mode_changed && zmode != 0u && !need_flash) {
 		ui_request_new_event(BANNER_FIRE, idx);

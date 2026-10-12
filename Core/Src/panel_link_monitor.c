@@ -39,10 +39,12 @@ static void panel_link_push_lost_ui(void)
 
 static void panel_link_clear_lost_ui(void)
 {
+	/* Всегда снять локальный «НЕТ СВЯЗИ». Для v3 одного RequestFaultUiRefresh
+	 * мало: при HAS_FAULTS и пустом списке (FAULT_SET ещё не дошёл) уходит в
+	 * wait_fault_evt_ui и НЕ затирает WARN — надпись залипала после resume. */
+	RsPanelEndpoint_QueueWarningUi(0u, 0u, 0, 0);
 	if (RsPanelV3Slave_IsV3Active() != 0u) {
 		RsPanelV3Slave_RequestFaultUiRefresh();
-	} else {
-		RsPanelEndpoint_QueueWarningUi(0u, 0u, 0, 0);
 	}
 }
 
@@ -57,6 +59,17 @@ void PanelLinkMonitor_Init(void)
 uint8_t PanelLinkMonitor_IsLost(void)
 {
 	return s_lost_active;
+}
+
+void PanelLinkMonitor_OnHostRx(void)
+{
+	/* Вызывать после обновления last_host_rx_ms. Иначе FAULT_SET в том же
+	 * POLL IRQ упирается в IsLost() внутри push_faults_ui и не сменяет WARN. */
+	s_ever_linked = 1u;
+	if (s_lost_active != 0u) {
+		s_lost_active = 0u;
+		panel_link_clear_lost_ui();
+	}
 }
 
 void PanelLinkMonitor_Timer10ms(void)

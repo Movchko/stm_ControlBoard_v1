@@ -14,6 +14,8 @@ extern "C" {
 
 void PanelLinkMonitor_Init(void);
 void PanelLinkMonitor_Timer10ms(void);
+/** Кадр от ППКУ (POLL/…): связь жива — снять «НЕТ СВЯЗИ» до FAULT_SET в том же IRQ. */
+void PanelLinkMonitor_OnHostRx(void);
 /** 1 = показываем неисправность «НЕТ СВЯЗИ». */
 uint8_t PanelLinkMonitor_IsLost(void);
 

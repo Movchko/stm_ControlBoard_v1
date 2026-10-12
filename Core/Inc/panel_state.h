@@ -9,12 +9,9 @@
 extern "C" {
 #endif
 
-#define PANEL_STATE_MAX_WARN_ITEMS 4u
-
 typedef struct {
     RsPanelCaps caps;
     uint16_t current_screen;
-    uint8_t  fire_active;
     uint8_t last_host_seq;
     uint8_t btn_prev_state[NUM_BUTTON];
     uint8_t btn_prev_level[NUM_BUTTON];
@@ -22,8 +19,6 @@ typedef struct {
     uint8_t pending_btn_count;
     RsPanelUiEvent pending_ui[RS_PANEL_MAX_POLL_UI_EVENTS];
     uint8_t pending_ui_count;
-    char warning_titles[PANEL_STATE_MAX_WARN_ITEMS][24];
-    char warning_details[PANEL_STATE_MAX_WARN_ITEMS][ZONE_NAME_SIZE + 1];
     /* 1 = нужно отправить RSP_CAPS (автоопределение типа / PROFILE_SET). */
     uint8_t caps_resync_pending;
 } PanelStateContext;
@@ -32,7 +27,6 @@ void PanelState_Init(PanelStateContext *ctx);
 void PanelState_ResetUi(PanelStateContext *ctx);
 void PanelState_ApplyProfileSet(PanelStateContext *ctx, const RsPanelProfileSetCmd *cmd);
 void PanelState_SampleButtons(PanelStateContext *ctx);
-void PanelState_FillPollResponse(PanelStateContext *ctx, RsPanelPollRsp *rsp);
 /* 1 = был запрос на пересылку CAPS; сбрасывает флаг. */
 uint8_t PanelState_TakeCapsResyncPending(PanelStateContext *ctx);
 /* Выбор зоны пожара на главном экране → UI_EVT_FIRE_SELECT на ППКУ2. */

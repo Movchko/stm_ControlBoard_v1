@@ -5,13 +5,13 @@
 #include "led.h"
 #include "beeper.h"
 #include "sound_profiles.h"
-#include "panel_ui_bridge.h"
 #include "panel_journal_cache.h"
 #include "panel_link_monitor.h"
 #include "rs_panel_endpoint.h"
 #include "menu_ui.h"
 #include "esp_manager.h"
 #include "device_config.h"
+#include "panel_cfg.h"
 #include "panel_host_cache.h"
 #include "panel_catalog_cache.h"
 #include "fire.h"
@@ -20,11 +20,62 @@
 #include <string.h>
 #include <stdio.h>
 
-#define RS_V3_HOLD_START_ALL_MS  3000u
-#define RS_V3_HOLD_FIRE_RESET_MS 5000u
-#define RS_V3_BLINK_HALF_MS      800u
+#define RS_V3_HOLD_START_ALL_MS     3000u /* ПУСК ОБЩИЙ: отсчёт на экране */
+#define RS_V3_SP_ARM_MS             2000u /* ПУСК СП (малая): до появления таймера */
+#define RS_V3_SP_COUNTDOWN_MS       3000u /* ПУСК СП (малая): отсчёт = как ОБЩИЙ */
+#define RS_V3_HOLD_FIRE_RESET_MS    5000u /* ОСТАНОВ: сброс пожара */
+#define RS_V3_BLINK_HALF_MS         800u
 /* После последнего ZONE/DEV TLV — сохранить Flash (не на каждый POLL). */
 #define RS_V3_CATALOG_FLASH_QUIET_MS 400u
+/* ПУСК СП: повтор до эффекта в ZONES (ACK ≠ Phase2; хост может silent no-op). */
+#define RS_V3_START_SP_RETRY_MS     200u
+/* Ретраи EVT до подтверждения хоста в ZONES (не по ACK). */
+#define RS_V3_START_SP_CONFIRM_MS   12000u
+#define RS_V3_START_ALL_CONFIRM_MS  12000u
+#define RS_V3_STOP_CONFIRM_MS       12000u
+/* Fire-ctrl в слоте без ACK: сброс слота и решение по свежим ZONES (не вечный dedupe). */
+#define RS_V3_EVT_INFLIGHT_TIMEOUT_MS 1500u
+/* HAS_FAULTS=0 при живом UI — не мигать «НОРМА» на один POLL. */
+#define RS_V3_FAULT_CLEAR_SAFE_MS   500u
+
+/* >>> RS_V3_DBG_START_ALL_LAG BEGIN
+ * TEMP отладка лага ПУСК ОБЩИЙ: удалить ВСЁ между BEGIN/END (поиск: RS_V3_DBG_START_ALL_LAG).
+ * Live Expressions / Watch:
+ *   g_rs_v3_dbg_sa.post_ms / first_build_ms / ack_ms
+ *   g_rs_v3_dbg_sa.dt_post_to_build_ms  — пост EVT → первый BuildRsp с COMMIT
+ *   g_rs_v3_dbg_sa.dt_build_to_ack_ms   — первый BuildRsp → ACK с хоста
+ *   g_rs_v3_dbg_sa.dt_post_to_ack_ms    — пост → ACK
+ *   g_rs_v3_dbg_sa.post_ok (1=в слоте), .post_seq, .post_pending, .q_n
+ *   g_rs_v3_dbg_sa.build_hits — сколько BuildRsp ушли с COMMIT до ACK
+ * Breakpoint: rs_v3_dbg_sa_mark — смотреть stage: 1=post, 2=first BuildRsp, 3=ACK.
+ * <<< */
+typedef struct {
+    volatile uint32_t post_ms;
+    volatile uint32_t first_build_ms;
+    volatile uint32_t ack_ms;
+    volatile uint32_t dt_post_to_build_ms;
+    volatile uint32_t dt_build_to_ack_ms;
+    volatile uint32_t dt_post_to_ack_ms;
+    volatile uint32_t build_hits;
+    volatile uint8_t  post_ok;
+    volatile uint8_t  post_seq;
+    volatile uint8_t  post_type;
+    volatile uint8_t  post_pending;
+    volatile uint8_t  q_n;
+    volatile uint8_t  first_build_seq;
+    volatile uint8_t  ack_seq;
+    volatile uint8_t  stage; /* 0 idle, 1 post, 2 build, 3 ack */
+} RsV3DbgStartAllLag;
+
+volatile RsV3DbgStartAllLag g_rs_v3_dbg_sa;
+
+static void rs_v3_dbg_sa_mark(uint8_t stage)
+{
+    g_rs_v3_dbg_sa.stage = stage;
+    /* BP здесь: stage 1/2/3 + поля g_rs_v3_dbg_sa.* */
+    (void)stage;
+}
+/* >>> RS_V3_DBG_START_ALL_LAG END */
 
 static uint8_t s_sys_ready;
 static uint8_t s_fire_active;
@@ -33,8 +84,12 @@ static uint8_t s_has_faults;
 static uint8_t s_power_input_fault; /* SYS POWER_INPUT_FAULT → мигание LED_POWER */
 static uint16_t s_led_power_toggle_cnt; /* тики 10 мс; период = LED_POWER_TOOGLE_PERIOD_MS */
 
-static RsPanelV3Event s_event;
-static uint8_t s_event_seq_ctr;
+static RsPanelV3Event s_event;           /* ordinary lane inflight */
+static RsPanelV3Event s_event_crit;      /* critical lane inflight */
+static uint8_t s_event_seq_ctr;          /* общий счётчик seq для обеих линий */
+static uint32_t s_event_inflight_ms;      /* HAL tick поста в s_event; 0 = пуст */
+static uint32_t s_event_crit_inflight_ms; /* HAL tick поста в s_event_crit; 0 = пуст */
+static uint16_t s_zones_apply_gen;   /* ++ на каждый from_host ZONES */
 
 static char s_zone_name_by_id[32 + 1u][RS_PANEL_V3_ZONE_NAME_LEN];
 static uint8_t s_zone_name_valid[32 + 1u];
@@ -62,7 +117,6 @@ static uint8_t s_hold_reset_committed;
 static uint8_t s_blink_on;
 static uint32_t s_blink_last_ms;
 static uint8_t s_local_timer_s[RS_PANEL_V3_MAX_ZONES];
-static uint32_t s_local_timer_tick_ms;
 static uint8_t s_v3_active;
 static uint8_t s_selected_zone; /* 0 = все; CAN zone 1..N */
 static uint8_t s_fault_placeholder_active;
@@ -83,6 +137,7 @@ static uint32_t s_fault_sound_deadline_ms;
 static uint32_t s_fault_resync_wait_ms; /* старт ожидания SET после CLEAR_ALL */
 static uint16_t s_fault_ui_pushed_count; /* последний n, ушедший в UI */
 static uint16_t s_fault_pre_clear_count; /* count до CLEAR_ALL (для SIGNAL при росте) */
+static uint32_t s_fault_clear_safe_ms; /* старт debounce HAS_FAULTS=0 → wipe UI */
 
 /* Локальные фазы звука/LED пожара (v3: CMD_SOUND/LED с хоста нет). */
 #define RS_V3_FIRE_SND_IDLE   0u
@@ -90,24 +145,67 @@ static uint16_t s_fault_pre_clear_count; /* count до CLEAR_ALL (для SIGNAL 
 #define RS_V3_FIRE_SND_START  2u  /* тушение → паттерн ПУСК + LED_START */
 #define RS_V3_FIRE_SND_DUTY   3u  /* ТУШ.ВЫП / дежурный */
 static uint8_t s_fire_snd_phase;
+/* Внутри ALERT: 1 = ПОЖАР1 pulse, 0 = continuous (ПОЖАР2/countdown). */
+static uint8_t s_fire_snd_alert_fire1;
 
-/* Общая очередь EVT (журнал/меню/wifi/звук + fire-ctrl).
- * s_event = «1-е место» (в полёте до ACK). s_evt_q = ожидающие.
- * Fire-ctrl вставляется после последнего fire в очереди (2-е / 2+ место),
- * обычные — в хвост. In-flight не вытесняем. */
+/* Две независимые EVT-линии (NO preemption между ними).
+ * Ordinary: s_event / s_evt_q — журнал/меню/wifi/звук.
+ * Critical: s_event_crit / s_evt_q_crit — START_SP/STOP/START_ALL/FIRE_RESET.
+ * Общий s_event_seq_ctr — уникальный seq across lanes. */
 #define RS_V3_EVT_Q_MAX 12u
 static RsPanelV3Event s_evt_q[RS_V3_EVT_Q_MAX];
 static uint8_t s_evt_q_n;
+static RsPanelV3Event s_evt_q_crit[RS_V3_EVT_Q_MAX];
+static uint8_t s_evt_q_crit_n;
 /* Повтор PostEvent после hold, пока слот/очередь не приняли. */
 static uint8_t s_start_all_evt_pending;
+static uint32_t s_start_all_confirm_until_ms; /* UI-hold; не сбрасывать на ACK */
+static uint16_t s_start_all_confirm_retry_ms;
+static uint8_t s_start_all_ack_done; /* 1 = EVT ACK — больше не ретраить COMMIT */
 static uint8_t s_fire_reset_evt_pending;
+static uint8_t s_fire_reset_evt_zone; /* zone на момент commit RESET */
+static uint8_t s_start_sp_evt_pending;
+static uint8_t s_stop_launch_evt_pending;
+static uint32_t s_stop_confirm_until_ms; /* до ACK — доставка; после ACK — ZONES goal */
+static uint16_t s_stop_confirm_retry_ms;
+static uint8_t s_stop_ack_done;
+static uint8_t s_stop_want_paused; /* 1=ждём PAUSED, 0=ждём resume(COUNTDOWN) */
+/* Уровни кнопок (антидребезг / SM). OnButtonSample не постит STOP/SP — только Drain. */
+static uint8_t s_btn_start_sp_down;
+static uint8_t s_btn_stop_evt_down;
+/* 1 = в этом тике Drain уже отправил STOP (не дублировать из OnButtonSample). */
+static uint8_t s_drain_posted_stop;
+/* ПУСК СП: hold_ms; малая — arm 2с → countdown 3с → START_ALL_COMMIT. */
+static uint8_t s_hold_start_sp;          /* кнопка зажата (малая) */
+static uint16_t s_hold_start_sp_ms;      /* длительность зажатия FIRE (малая/большая) */
+static uint8_t s_hold_start_sp_cd;       /* фаза UI-таймера (малая) */
+static uint16_t s_hold_start_sp_cd_ms;
+static uint8_t s_hold_start_sp_committed;
+/* После START_SP (RELEASE): ретраи каждые RS_V3_START_SP_RETRY_MS, пока есть что стартовать. */
+static uint32_t s_start_sp_confirm_until_ms; /* гасить при !should_retry / таймаут; ACK без still_need — тоже */
+static uint16_t s_start_sp_confirm_retry_ms;
+static uint8_t s_start_sp_ack_done;
+/* ОСТАНОВ: фронт press → STOP; удержание ≥5с → RESET. */
+static uint16_t s_stop_press_ms;
 
 static void rs_v3_restore_start_all_idle_leds(void);
+static void rs_v3_post_start_sp(void);
+static void rs_v3_arm_start_sp_confirm(void);
+static uint8_t rs_v3_start_sp_should_retry(void);
+static void rs_v3_post_start_all_commit(void);
+static void rs_v3_post_stop_launch(void);
+static void rs_v3_cancel_start_sp_confirm(void);
+static void rs_v3_cancel_stop_confirm(void);
+static void rs_v3_evt_q_crit_remove_type_zone(uint8_t type, uint8_t zone);
+static void rs_v3_force_fire_event(uint8_t type, uint8_t zone);
+static void rs_v3_evt_inflight_watchdog(void);
+static void rs_v3_apply_zones(const RsPanelV3Zones *z);
 static uint8_t rs_v3_has_attention_faults(void);
 static void rs_v3_fault_beep(uint8_t attn, uint8_t signal);
 static void rs_v3_fault_sound_after_resync(void);
 static void rs_v3_sync_fire_indication(void);
 static void rs_v3_evt_flush_queue(void);
+static void rs_v3_evt_flush_crit(void);
 static void rs_v3_evt_retry_sticky(void);
 static void rs_v3_recalc_catalog_crc(void);
 static uint8_t rs_v3_catalog_flash_load(void);
@@ -128,6 +226,7 @@ uint8_t RsPanelV3Slave_IsV3Active(void)
 void RsPanelV3Slave_Init(void)
 {
     memset(&s_event, 0, sizeof(s_event));
+    memset(&s_event_crit, 0, sizeof(s_event_crit));
     memset(s_zone_name_by_id, 0, sizeof(s_zone_name_by_id));
     memset(s_zone_name_valid, 0, sizeof(s_zone_name_valid));
     memset(s_device_catalog, 0, sizeof(s_device_catalog));
@@ -150,6 +249,9 @@ void RsPanelV3Slave_Init(void)
     s_power_input_fault = 0u;
     s_led_power_toggle_cnt = 0u;
     s_event_seq_ctr = 1u;
+    s_event_inflight_ms = 0u;
+    s_event_crit_inflight_ms = 0u;
+    s_zones_apply_gen = 0u;
     s_hold_start_all = 0u;
     s_hold_reset = 0u;
     s_zones_valid = 0u;
@@ -164,11 +266,37 @@ void RsPanelV3Slave_Init(void)
     s_fault_resync_wait_ms = 0u;
     s_fault_ui_pushed_count = 0u;
     s_fault_pre_clear_count = 0u;
+    s_fault_clear_safe_ms = 0u;
     s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
+    s_fire_snd_alert_fire1 = 0u;
     s_evt_q_n = 0u;
     memset(s_evt_q, 0, sizeof(s_evt_q));
+    s_evt_q_crit_n = 0u;
+    memset(s_evt_q_crit, 0, sizeof(s_evt_q_crit));
     s_start_all_evt_pending = 0u;
+    s_start_all_confirm_until_ms = 0u;
+    s_start_all_confirm_retry_ms = 0u;
+    s_start_all_ack_done = 0u;
     s_fire_reset_evt_pending = 0u;
+    s_fire_reset_evt_zone = 0u;
+    s_start_sp_evt_pending = 0u;
+    s_stop_launch_evt_pending = 0u;
+    s_stop_confirm_until_ms = 0u;
+    s_stop_confirm_retry_ms = 0u;
+    s_stop_ack_done = 0u;
+    s_stop_want_paused = 0u;
+    s_btn_start_sp_down = 0u;
+    s_btn_stop_evt_down = 0u;
+    s_drain_posted_stop = 0u;
+    s_hold_start_sp = 0u;
+    s_hold_start_sp_ms = 0u;
+    s_hold_start_sp_cd = 0u;
+    s_hold_start_sp_cd_ms = 0u;
+    s_hold_start_sp_committed = 0u;
+    s_start_sp_confirm_until_ms = 0u;
+    s_start_sp_confirm_retry_ms = 0u;
+    s_start_sp_ack_done = 0u;
+    s_stop_press_ms = 0u;
     /* Flash-каталог: при совпадении CRC с ППКУ rewrite пропускается. */
     if (rs_v3_catalog_flash_load() == 0u) {
         s_rsp_flags |= RS_PANEL_V3_RSP_FLAG_NEED_CATALOG;
@@ -186,20 +314,36 @@ uint8_t RsPanelV3Slave_HasFaults(void)
 }
 uint8_t RsPanelV3Slave_IsFireActive(void) { return s_fire_active; }
 uint8_t RsPanelV3Slave_IsConfigActive(void) { return s_config_active; }
-uint8_t RsPanelV3Slave_IsHoldActive(void) { return s_hold_start_all; }
+uint8_t RsPanelV3Slave_IsHoldActive(void)
+{
+    /* UI-таймер: ПУСК ОБЩИЙ или фаза countdown ПУСК СП (малая). */
+    if (s_hold_start_all != 0u && s_hold_start_all_committed == 0u) {
+        return 1u;
+    }
+    if (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) {
+        return 1u;
+    }
+    return 0u;
+}
 
 uint8_t RsPanelV3Slave_GetHoldRemainingSec(void)
 {
     uint16_t left_ms;
-    if (s_hold_start_all == 0u || s_hold_start_all_committed != 0u) {
-        return 0u;
+    if (s_hold_start_all != 0u && s_hold_start_all_committed == 0u) {
+        if (s_hold_start_all_ms >= RS_V3_HOLD_START_ALL_MS) {
+            return 0u;
+        }
+        left_ms = (uint16_t)(RS_V3_HOLD_START_ALL_MS - s_hold_start_all_ms);
+        return (uint8_t)((left_ms + 999u) / 1000u);
     }
-    if (s_hold_start_all_ms >= RS_V3_HOLD_START_ALL_MS) {
-        return 0u;
+    if (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) {
+        if (s_hold_start_sp_cd_ms >= RS_V3_SP_COUNTDOWN_MS) {
+            return 0u;
+        }
+        left_ms = (uint16_t)(RS_V3_SP_COUNTDOWN_MS - s_hold_start_sp_cd_ms);
+        return (uint8_t)((left_ms + 999u) / 1000u);
     }
-    left_ms = (uint16_t)(RS_V3_HOLD_START_ALL_MS - s_hold_start_all_ms);
-    /* 3000..2001 → 3; 2000..1001 → 2; 1000..1 → 1 */
-    return (uint8_t)((left_ms + 999u) / 1000u);
+    return 0u;
 }
 
 static uint8_t rs_v3_evt_is_fire_ctrl(uint8_t type)
@@ -210,21 +354,105 @@ static uint8_t rs_v3_evt_is_fire_ctrl(uint8_t type)
             type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET) ? 1u : 0u;
 }
 
-static void rs_v3_evt_assign(uint8_t type, uint8_t zone, uint8_t u8_a,
-                             uint16_t u16_a, uint16_t u16_b)
+static void rs_v3_evt_next_seq(uint8_t *out_seq)
 {
     if (s_event_seq_ctr == 0u) {
         s_event_seq_ctr = 1u;
     }
-    s_event.seq = s_event_seq_ctr++;
+    *out_seq = s_event_seq_ctr++;
     if (s_event_seq_ctr == 0u) {
         s_event_seq_ctr = 1u;
     }
+}
+
+static void rs_v3_evt_assign(uint8_t type, uint8_t zone, uint8_t u8_a,
+                             uint16_t u16_a, uint16_t u16_b)
+{
+    rs_v3_evt_next_seq(&s_event.seq);
     s_event.type = type;
     s_event.zone = zone;
     s_event.u8_a = u8_a;
     s_event.u16_a = u16_a;
     s_event.u16_b = u16_b;
+    s_event_inflight_ms = HAL_GetTick();
+    if (s_event_inflight_ms == 0u) {
+        s_event_inflight_ms = 1u;
+    }
+}
+
+static void rs_v3_evt_assign_crit(uint8_t type, uint8_t zone, uint8_t u8_a,
+                                  uint16_t u16_a, uint16_t u16_b)
+{
+    rs_v3_evt_next_seq(&s_event_crit.seq);
+    s_event_crit.type = type;
+    s_event_crit.zone = zone;
+    s_event_crit.u8_a = u8_a;
+    s_event_crit.u16_a = u16_a;
+    s_event_crit.u16_b = u16_b;
+    s_event_crit_inflight_ms = HAL_GetTick();
+    if (s_event_crit_inflight_ms == 0u) {
+        s_event_crit_inflight_ms = 1u;
+    }
+}
+
+static void rs_v3_evt_clear_inflight(void)
+{
+    s_event.seq = 0u;
+    s_event.type = (uint8_t)RS_PANEL_V3_EVT_NONE;
+    s_event_inflight_ms = 0u;
+}
+
+static void rs_v3_evt_clear_inflight_crit(void)
+{
+    s_event_crit.seq = 0u;
+    s_event_crit.type = (uint8_t)RS_PANEL_V3_EVT_NONE;
+    s_event_crit_inflight_ms = 0u;
+}
+
+static void rs_v3_evt_q_crit_remove_type_zone(uint8_t type, uint8_t zone)
+{
+    uint8_t i = 0u;
+    while (i < s_evt_q_crit_n) {
+        if (s_evt_q_crit[i].type == type && s_evt_q_crit[i].zone == zone) {
+            uint8_t j;
+            for (j = (uint8_t)(i + 1u); j < s_evt_q_crit_n; j++) {
+                s_evt_q_crit[j - 1u] = s_evt_q_crit[j];
+            }
+            s_evt_q_crit_n--;
+            continue;
+        }
+        i++;
+    }
+}
+
+static void rs_v3_cancel_start_sp_confirm(void)
+{
+    s_start_sp_confirm_until_ms = 0u;
+    s_start_sp_confirm_retry_ms = 0u;
+    s_start_sp_ack_done = 0u;
+    s_start_sp_evt_pending = 0u;
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_SP, 0u);
+    if (s_event_crit.seq != 0u &&
+        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_SP &&
+        s_event_crit.zone == 0u) {
+        rs_v3_evt_clear_inflight_crit();
+        rs_v3_evt_flush_crit();
+    }
+}
+
+static void rs_v3_cancel_stop_confirm(void)
+{
+    s_stop_confirm_until_ms = 0u;
+    s_stop_confirm_retry_ms = 0u;
+    s_stop_ack_done = 0u;
+    s_stop_launch_evt_pending = 0u;
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, 0u);
+    if (s_event_crit.seq != 0u &&
+        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH &&
+        s_event_crit.zone == 0u) {
+        rs_v3_evt_clear_inflight_crit();
+        rs_v3_evt_flush_crit();
+    }
 }
 
 static uint8_t rs_v3_evt_q_find(uint8_t type, uint8_t zone)
@@ -232,6 +460,17 @@ static uint8_t rs_v3_evt_q_find(uint8_t type, uint8_t zone)
     uint8_t i;
     for (i = 0u; i < s_evt_q_n; i++) {
         if (s_evt_q[i].type == type && s_evt_q[i].zone == zone) {
+            return i;
+        }
+    }
+    return 0xFFu;
+}
+
+static uint8_t rs_v3_evt_q_crit_find(uint8_t type, uint8_t zone)
+{
+    uint8_t i;
+    for (i = 0u; i < s_evt_q_crit_n; i++) {
+        if (s_evt_q_crit[i].type == type && s_evt_q_crit[i].zone == zone) {
             return i;
         }
     }
@@ -249,34 +488,45 @@ static void rs_v3_evt_q_write(uint8_t idx, uint8_t type, uint8_t zone, uint8_t u
     s_evt_q[idx].seq = 0u;
 }
 
-/* Место в очереди: выкинуть самый старый не-fire; если все fire — голову. */
+static void rs_v3_evt_q_crit_write(uint8_t idx, uint8_t type, uint8_t zone, uint8_t u8_a,
+                                   uint16_t u16_a, uint16_t u16_b)
+{
+    s_evt_q_crit[idx].type = type;
+    s_evt_q_crit[idx].zone = zone;
+    s_evt_q_crit[idx].u8_a = u8_a;
+    s_evt_q_crit[idx].u16_a = u16_a;
+    s_evt_q_crit[idx].u16_b = u16_b;
+    s_evt_q_crit[idx].seq = 0u;
+}
+
+/* Ordinary: при переполнении — выкинуть голову (FIFO). */
 static void rs_v3_evt_q_make_space(void)
 {
     uint8_t i;
-    uint8_t drop;
-    uint8_t have_drop = 0u;
 
     if (s_evt_q_n < RS_V3_EVT_Q_MAX) {
         return;
     }
-    drop = 0u;
-    for (i = s_evt_q_n; i > 0u; i--) {
-        if (rs_v3_evt_is_fire_ctrl(s_evt_q[i - 1u].type) == 0u) {
-            drop = (uint8_t)(i - 1u);
-            have_drop = 1u;
-            break;
-        }
-    }
-    if (have_drop == 0u) {
-        drop = 0u;
-    }
-    for (i = (uint8_t)(drop + 1u); i < s_evt_q_n; i++) {
+    for (i = 1u; i < s_evt_q_n; i++) {
         s_evt_q[i - 1u] = s_evt_q[i];
     }
     s_evt_q_n--;
 }
 
-/* Обычное событие — в хвост (дедуп type+zone). */
+static void rs_v3_evt_q_crit_make_space(void)
+{
+    uint8_t i;
+
+    if (s_evt_q_crit_n < RS_V3_EVT_Q_MAX) {
+        return;
+    }
+    for (i = 1u; i < s_evt_q_crit_n; i++) {
+        s_evt_q_crit[i - 1u] = s_evt_q_crit[i];
+    }
+    s_evt_q_crit_n--;
+}
+
+/* Ordinary — в хвост (дедуп type+zone). */
 static uint8_t rs_v3_evt_enqueue_tail(uint8_t type, uint8_t zone, uint8_t u8_a,
                                       uint16_t u16_a, uint16_t u16_b)
 {
@@ -291,54 +541,18 @@ static uint8_t rs_v3_evt_enqueue_tail(uint8_t type, uint8_t zone, uint8_t u8_a,
     return 1u;
 }
 
-/* Fire-ctrl: после последнего fire в очереди (перед обычными), сдвиг хвоста. */
-static uint8_t rs_v3_evt_enqueue_priority(uint8_t type, uint8_t zone, uint8_t u8_a,
-                                          uint16_t u16_a, uint16_t u16_b)
+/* Critical — простой FIFO (дедуп type+zone), без смешивания с ordinary. */
+static uint8_t rs_v3_evt_enqueue_crit_tail(uint8_t type, uint8_t zone, uint8_t u8_a,
+                                           uint16_t u16_a, uint16_t u16_b)
 {
-    uint8_t i;
-    uint8_t pos;
-    uint8_t found = rs_v3_evt_q_find(type, zone);
-
-    if (found != 0xFFu) {
-        /* Уже в очереди: обновить поля; если не в fire-префиксе — перенести. */
-        if (found > 0u) {
-            uint8_t all_fire_before = 1u;
-            for (i = 0u; i < found; i++) {
-                if (rs_v3_evt_is_fire_ctrl(s_evt_q[i].type) == 0u) {
-                    all_fire_before = 0u;
-                    break;
-                }
-            }
-            if (all_fire_before != 0u) {
-                rs_v3_evt_q_write(found, type, zone, u8_a, u16_a, u16_b);
-                return 1u;
-            }
-            /* Убрать и вставить заново с приоритетом. */
-            for (i = found + 1u; i < s_evt_q_n; i++) {
-                s_evt_q[i - 1u] = s_evt_q[i];
-            }
-            s_evt_q_n--;
-        } else {
-            rs_v3_evt_q_write(0u, type, zone, u8_a, u16_a, u16_b);
-            return 1u;
-        }
+    uint8_t i = rs_v3_evt_q_crit_find(type, zone);
+    if (i != 0xFFu) {
+        rs_v3_evt_q_crit_write(i, type, zone, u8_a, u16_a, u16_b);
+        return 1u;
     }
-
-    pos = 0u;
-    for (i = 0u; i < s_evt_q_n; i++) {
-        if (rs_v3_evt_is_fire_ctrl(s_evt_q[i].type) != 0u) {
-            pos = (uint8_t)(i + 1u);
-        } else {
-            break;
-        }
-    }
-
-    rs_v3_evt_q_make_space();
-    for (i = s_evt_q_n; i > pos; i--) {
-        s_evt_q[i] = s_evt_q[i - 1u];
-    }
-    rs_v3_evt_q_write(pos, type, zone, u8_a, u16_a, u16_b);
-    s_evt_q_n++;
+    rs_v3_evt_q_crit_make_space();
+    rs_v3_evt_q_crit_write(s_evt_q_crit_n, type, zone, u8_a, u16_a, u16_b);
+    s_evt_q_crit_n++;
     return 1u;
 }
 
@@ -356,31 +570,237 @@ static void rs_v3_evt_flush_queue(void)
     s_evt_q_n--;
 }
 
+static void rs_v3_evt_flush_crit(void)
+{
+    uint8_t i;
+    if (s_event_crit.seq != 0u || s_evt_q_crit_n == 0u) {
+        return;
+    }
+    rs_v3_evt_assign_crit(s_evt_q_crit[0].type, s_evt_q_crit[0].zone,
+                          s_evt_q_crit[0].u8_a, s_evt_q_crit[0].u16_a,
+                          s_evt_q_crit[0].u16_b);
+    for (i = 1u; i < s_evt_q_crit_n; i++) {
+        s_evt_q_crit[i - 1u] = s_evt_q_crit[i];
+    }
+    s_evt_q_crit_n--;
+}
+
 uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
                                  uint16_t u16_a, uint16_t u16_b)
 {
-    const uint8_t is_fire = rs_v3_evt_is_fire_ctrl(type);
-
     if (type == (uint8_t)RS_PANEL_V3_EVT_NONE) {
         return 0u;
     }
 
-    /* Слот свободен: fire сразу в полёт; обычные — в очередь и flush головы. */
-    if (s_event.seq == 0u) {
-        if (is_fire != 0u) {
-            rs_v3_evt_assign(type, zone, u8_a, u16_a, u16_b);
+    if (rs_v3_evt_is_fire_ctrl(type) != 0u) {
+        /* Critical lane only — без вытеснения ordinary. */
+        if (s_event_crit.seq == 0u) {
+            rs_v3_evt_assign_crit(type, zone, u8_a, u16_a, u16_b);
             return 1u;
         }
+        /* Sticky same type+zone: BuildRsp повторяет seq до ACK. */
+        if (s_event_crit.type == type && s_event_crit.zone == zone) {
+            return 1u;
+        }
+        return rs_v3_evt_enqueue_crit_tail(type, zone, u8_a, u16_a, u16_b);
+    }
+
+    /* Ordinary lane only — никогда не трогает critical. */
+    if (s_event.seq == 0u) {
         (void)rs_v3_evt_enqueue_tail(type, zone, u8_a, u16_a, u16_b);
         rs_v3_evt_flush_queue();
         return 1u;
     }
-
-    /* Слот занят — не вытесняем in-flight. */
-    if (is_fire != 0u) {
-        return rs_v3_evt_enqueue_priority(type, zone, u8_a, u16_a, u16_b);
-    }
     return rs_v3_evt_enqueue_tail(type, zone, u8_a, u16_a, u16_b);
+}
+
+/* ПУСК СП/ОБЩИЙ: ретраи пока есть зоны, которые ещё ждут пуска.
+ * FIRE1 тоже: иначе после ACK confirm гасится в ПОЖАР1, а хост ещё no-op.
+ * Не считать «готово» по любому EXTINGUISHING — иначе СП гаснет из‑за другой зоны. */
+static uint8_t rs_v3_zones_still_need_start(const RsPanelV3Zones *z)
+{
+    uint8_t i;
+    if (z == 0) {
+        return 0u;
+    }
+    for (i = 0u; i < z->count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+        const uint8_t st = z->items[i].status;
+        if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
+            st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
+            st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED ||
+            st == (uint8_t)RS_PANEL_V3_ZONE_EXT_ABORT ||
+            st == (uint8_t)RS_PANEL_V3_ZONE_FIRE1) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/* Ретраи START_SP только если есть работа: still_need, либо fire без снимка зон.
+ * Без пожара / пустые зоны / эффект уже есть → 0 (один post достаточно). */
+static uint8_t rs_v3_start_sp_should_retry_zones(const RsPanelV3Zones *z,
+                                                uint8_t zones_valid)
+{
+    if (zones_valid != 0u && z != 0 &&
+        rs_v3_zones_still_need_start(z) != 0u) {
+        return 1u;
+    }
+    if (s_fire_active != 0u &&
+        (zones_valid == 0u || z == 0 || z->count == 0u)) {
+        return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t rs_v3_start_sp_should_retry(void)
+{
+    return rs_v3_start_sp_should_retry_zones(&s_zones, s_zones_valid);
+}
+
+static void rs_v3_arm_start_sp_confirm(void)
+{
+    s_start_sp_confirm_until_ms = HAL_GetTick() + RS_V3_START_SP_CONFIRM_MS;
+    s_start_sp_confirm_retry_ms = 0u;
+    s_start_sp_ack_done = 0u;
+}
+
+/* ОСТАНОВ: хост уже в нужном состоянии (пауза или resume). */
+static uint8_t rs_v3_zones_stop_goal_met(const RsPanelV3Zones *z)
+{
+    uint8_t i;
+    uint8_t any = 0u;
+    uint8_t any_cd = 0u;
+    uint8_t any_paused = 0u;
+    if (z == 0) {
+        return 1u;
+    }
+    for (i = 0u; i < z->count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+        const uint8_t st = z->items[i].status;
+        if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) {
+            any = 1u;
+            any_cd = 1u;
+        } else if (st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED) {
+            any = 1u;
+            any_paused = 1u;
+        }
+    }
+    if (any == 0u) {
+        return 1u;
+    }
+    if (s_stop_want_paused != 0u) {
+        return (any_cd == 0u && any_paused != 0u) ? 1u : 0u;
+    }
+    return (any_paused == 0u && any_cd != 0u) ? 1u : 0u;
+}
+
+/* Fire-ctrl: всегда НОВЫЙ seq в critical слот. Только critical lane.
+ * Sticky same-type без ACK давал «куча нажатий → 0 эффектов». */
+static void rs_v3_force_fire_event(uint8_t type, uint8_t zone)
+{
+    if (type == (uint8_t)RS_PANEL_V3_EVT_NONE) {
+        return;
+    }
+    rs_v3_evt_q_crit_remove_type_zone(type, zone);
+    if (s_event_crit.seq != 0u &&
+        (s_event_crit.type != type || s_event_crit.zone != zone)) {
+        (void)rs_v3_evt_enqueue_crit_tail(s_event_crit.type, s_event_crit.zone,
+                                          s_event_crit.u8_a, s_event_crit.u16_a,
+                                          s_event_crit.u16_b);
+    }
+    rs_v3_evt_assign_crit(type, zone, 0u, 0u, 0u);
+}
+
+static void rs_v3_post_start_sp_raw(void)
+{
+    /* zone=0 — все awaiting (как ОСТАНОВ / надёжный Phase2All на ППКУ). */
+    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_START_SP, 0u);
+    s_start_sp_evt_pending = 0u;
+}
+
+static void rs_v3_post_start_sp(void)
+{
+    /* ПУСК СП на хосте снимает паузу (Phase2AllPending) — не держать STOP confirm. */
+    rs_v3_cancel_stop_confirm();
+    /* UI только из ZONES хоста — без optimistic ТУШЕНИЕ/ПАУЗА. */
+    rs_v3_post_start_sp_raw();
+    rs_v3_arm_start_sp_confirm();
+}
+
+static void rs_v3_post_start_all_commit(void)
+{
+    uint8_t posted;
+    if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_ALL_COMMIT, 0u, 0u, 0u, 0u) == 0u) {
+        s_start_all_evt_pending = 1u;
+        posted = 0u;
+    } else {
+        s_start_all_evt_pending = 0u;
+        posted = 1u;
+    }
+    /* >>> RS_V3_DBG_START_ALL_LAG BEGIN */
+    {
+        const uint32_t now = HAL_GetTick();
+        g_rs_v3_dbg_sa.post_ms = now;
+        g_rs_v3_dbg_sa.first_build_ms = 0u;
+        g_rs_v3_dbg_sa.ack_ms = 0u;
+        g_rs_v3_dbg_sa.dt_post_to_build_ms = 0u;
+        g_rs_v3_dbg_sa.dt_build_to_ack_ms = 0u;
+        g_rs_v3_dbg_sa.dt_post_to_ack_ms = 0u;
+        g_rs_v3_dbg_sa.build_hits = 0u;
+        g_rs_v3_dbg_sa.post_ok = posted;
+        g_rs_v3_dbg_sa.post_seq = s_event_crit.seq;
+        g_rs_v3_dbg_sa.post_type = s_event_crit.type;
+        g_rs_v3_dbg_sa.post_pending = s_start_all_evt_pending;
+        g_rs_v3_dbg_sa.q_n = s_evt_q_crit_n;
+        g_rs_v3_dbg_sa.first_build_seq = 0u;
+        g_rs_v3_dbg_sa.ack_seq = 0u;
+        rs_v3_dbg_sa_mark(1u);
+    }
+    /* >>> RS_V3_DBG_START_ALL_LAG END */
+    s_start_all_confirm_until_ms = HAL_GetTick() + RS_V3_START_ALL_CONFIRM_MS;
+    s_start_all_confirm_retry_ms = 0u;
+    s_start_all_ack_done = 0u;
+}
+
+static void rs_v3_post_stop_launch_raw(void)
+{
+    /* zone=0 → на ППКУ Fire_PanelStopAllZones (пауза/resume всех).
+     * Новый seq на каждый press — иначе sticky same-seq = master no-op. */
+    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, 0u);
+    s_stop_launch_evt_pending = 0u;
+}
+
+static void rs_v3_post_stop_launch(void)
+{
+    uint8_t i;
+    /* Ретраи START_SP / COMMIT после ОСТАНОВ снова зовут Phase2 и снимают паузу. */
+    rs_v3_cancel_start_sp_confirm();
+    s_start_all_confirm_until_ms = 0u;
+    s_start_all_confirm_retry_ms = 0u;
+    s_start_all_ack_done = 0u;
+    s_start_all_evt_pending = 0u;
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT, 0u);
+    if (s_event_crit.seq != 0u &&
+        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT) {
+        /* Не сохранять COMMIT в очередь — после STOP он снова Phase2. */
+        rs_v3_evt_clear_inflight_crit();
+    }
+    /* Цель по текущему ZONES: есть COUNTDOWN → пауза; иначе resume. */
+    s_stop_want_paused = 0u;
+    if (s_zones_valid != 0u) {
+        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+            if (s_zones.items[i].status == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) {
+                s_stop_want_paused = 1u;
+                break;
+            }
+        }
+    } else {
+        s_stop_want_paused = 1u;
+    }
+    rs_v3_post_stop_launch_raw();
+    /* До ACK — ретраи доставки; после ACK — только ZONES (без второго toggle). */
+    s_stop_confirm_until_ms = HAL_GetTick() + RS_V3_STOP_CONFIRM_MS;
+    s_stop_confirm_retry_ms = 0u;
+    s_stop_ack_done = 0u;
 }
 
 static void rs_v3_evt_retry_sticky(void)
@@ -391,20 +811,61 @@ static void rs_v3_evt_retry_sticky(void)
         }
     }
     if (s_fire_reset_evt_pending != 0u) {
-        if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_FIRE_RESET, 0u, 0u, 0u, 0u) != 0u) {
+        if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_FIRE_RESET, s_fire_reset_evt_zone,
+                                     0u, 0u, 0u) != 0u) {
             s_fire_reset_evt_pending = 0u;
         }
+    }
+    if (s_start_sp_evt_pending != 0u && s_stop_confirm_until_ms == 0u) {
+        rs_v3_post_start_sp_raw();
+    }
+    if (s_stop_launch_evt_pending != 0u) {
+        rs_v3_post_stop_launch_raw();
+    }
+    rs_v3_evt_flush_queue();
+    rs_v3_evt_flush_crit();
+}
+
+/* Inflight watchdog: ordinary — сброс зависшего fire-ctrl (не должно быть);
+ * critical — START_SP/STOP/START_ALL timeout + retry. */
+static void rs_v3_evt_inflight_watchdog(void)
+{
+    const uint32_t now = HAL_GetTick();
+
+    if (s_event.seq != 0u && s_event_inflight_ms != 0u &&
+        rs_v3_evt_is_fire_ctrl(s_event.type) != 0u &&
+        (uint32_t)(now - s_event_inflight_ms) >= RS_V3_EVT_INFLIGHT_TIMEOUT_MS) {
+        rs_v3_evt_clear_inflight();
+        rs_v3_evt_flush_queue();
+    }
+
+    if (s_event_crit.seq == 0u || s_event_crit_inflight_ms == 0u) {
+        return;
+    }
+    if (rs_v3_evt_is_fire_ctrl(s_event_crit.type) == 0u) {
+        return;
+    }
+    if ((uint32_t)(now - s_event_crit_inflight_ms) < RS_V3_EVT_INFLIGHT_TIMEOUT_MS) {
+        return;
+    }
+
+    /* Sticky тот же seq: BuildRsp уже повторяет EVT. Новый seq срывает
+     * запоздавший ACK и при пожаре крутил watchdog без доставки. */
+    s_event_crit_inflight_ms = now;
+    if (s_event_crit_inflight_ms == 0u) {
+        s_event_crit_inflight_ms = 1u;
     }
 }
 
 uint8_t RsPanelV3Slave_IsEventPending(void)
 {
-    return (s_event.seq != 0u) ? 1u : 0u;
+    return (s_event.seq != 0u || s_event_crit.seq != 0u) ? 1u : 0u;
 }
 
 uint8_t RsPanelV3Slave_IsEventIdle(void)
 {
-    return (s_event.seq == 0u && s_evt_q_n == 0u) ? 1u : 0u;
+    return (s_event.seq == 0u && s_evt_q_n == 0u &&
+            s_event_crit.seq == 0u && s_evt_q_crit_n == 0u) ? 1u : 0u;
 }
 
 static void rs_v3_restore_start_all_idle_leds(void)
@@ -542,8 +1003,32 @@ static void rs_v3_sync_fire_indication(void)
             Beeper_FireAlarmOff();
             Beeper_StopPattern();
             Led_Set(LED_START, 0u);
+            Led_Set(LED_BUT_START_SP, 0u);
+            Led_Set(LED_STR_START_SP, 0u);
+            Led_Set(LED_BUT_STOP, 0u);
+            Led_Set(LED_STR_STOP, 0u);
             s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
+            s_fire_snd_alert_fire1 = 0u;
             rs_v3_restore_fault_beep_if_needed();
+        }
+        return;
+    }
+
+    /* Без ZONES: сразу ПОЖАР1 pulse (не continuous — иначе ложный FIRE2).
+     * Раньше return → секунды тишины, пока ZONES режется ради ACK/стрима. */
+    if (s_zones.count == 0u || s_zones_valid == 0u) {
+        if (s_fire_snd_phase != RS_V3_FIRE_SND_ALERT || s_fire_snd_alert_fire1 == 0u) {
+            s_fault_sound_phase = RS_V3_FS_IDLE;
+            s_fault_sound_deadline_ms = 0u;
+            Beeper_ContinuousOff();
+            Beeper_FireAlarmOff();
+            Beeper_StopPattern();
+            Beeper_ResumeSoundOnNewEvent();
+            Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
+                                   SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
+            s_fire_snd_phase = RS_V3_FIRE_SND_ALERT;
+            s_fire_snd_alert_fire1 = 1u;
+            Led_Set(LED_START, 0u);
         }
         return;
     }
@@ -570,12 +1055,38 @@ static void rs_v3_sync_fire_indication(void)
         desired = RS_V3_FIRE_SND_ALERT;
     }
 
-    if (desired == s_fire_snd_phase) {
-        Led_Set(LED_START, (desired == RS_V3_FIRE_SND_START) ? 1u : 0u);
-        return;
+    /* LED ПУСК СП / ОСТ.ПУСК — как Fire_ApplyStateLeds на ППКУ1. */
+    {
+        /* ПУСК СП доступен и в ПОЖАР1 (принудительный пуск). */
+        uint8_t need_ctrl = 0u;
+        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+            const uint8_t st = s_zones.items[i].status;
+            if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_EXT_ABORT ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_FIRE1) {
+                need_ctrl = 1u;
+                break;
+            }
+        }
+        Led_Set(LED_BUT_START_SP, need_ctrl);
+        Led_Set(LED_STR_START_SP, need_ctrl);
+        Led_Set(LED_BUT_STOP, need_ctrl);
+        Led_Set(LED_STR_STOP, need_ctrl);
     }
 
     fire1 = rs_v3_zones_want_fire1();
+    /* ALERT уже играет: но ПОЖАР1→countdown должен сменить pulse на continuous. */
+    if (desired == s_fire_snd_phase) {
+        if (desired == RS_V3_FIRE_SND_ALERT && fire1 != s_fire_snd_alert_fire1) {
+            /* fall through — переиграть ALERT */
+        } else {
+            Led_Set(LED_START, (desired == RS_V3_FIRE_SND_START) ? 1u : 0u);
+            return;
+        }
+    }
+
     s_fault_sound_phase = RS_V3_FS_IDLE;
     s_fault_sound_deadline_ms = 0u;
     Beeper_ContinuousOff();
@@ -587,11 +1098,14 @@ static void rs_v3_sync_fire_indication(void)
         if (fire1 != 0u) {
             Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
                                    SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
+            s_fire_snd_alert_fire1 = 1u;
         } else {
             Beeper_FireAlarmOn();
+            s_fire_snd_alert_fire1 = 0u;
         }
         Led_Set(LED_START, 0u);
     } else if (desired == RS_V3_FIRE_SND_START) {
+        s_fire_snd_alert_fire1 = 0u;
         Beeper_ResumeSoundOnNewEvent();
         Beeper_StartPulseTrain(BEEPER_PATTERN_START_ON_MS, BEEPER_PATTERN_START_OFF_MS,
                                BEEPER_PATTERN_START_PULSES, BEEPER_PATTERN_START_REPEAT_MS);
@@ -599,6 +1113,7 @@ static void rs_v3_sync_fire_indication(void)
         Led_SetBrightness(LED_START, LED_STATUS_MAX_BRIGHTNESS);
         Led_ForceStatusBright(LED_START);
     } else {
+        s_fire_snd_alert_fire1 = 0u;
         /* DUTY: не Resume — иначе после ТУШ.ВЫП снова «орёт» unmute. */
         if (fire1 != 0u) {
             Beeper_StartPulseTrain(SOUND_FIRE1_DUTY_ON_MS, SOUND_FIRE1_DUTY_OFF_MS,
@@ -637,38 +1152,73 @@ static void rs_v3_recalc_catalog_crc(void)
     s_faults_crc = RsPanelV3_FaultEvtCrc(s_active_faults, s_active_fault_count);
 }
 
-static void rs_v3_sync_host_cache_from_catalog(void)
+/* UI-кэш: зоны и МКУ обновляем раздельно (не полный rebuild на каждый ADD). */
+static void rs_v3_host_cache_put_zone(uint8_t zone, const char *name)
 {
     PanelHostCache *host = PanelHostCache_Get();
+    size_t n;
+
+    if (zone == 0u || zone > PANEL_CATALOG_ZONE_SLOTS || host == 0) {
+        return;
+    }
+    memset(host->zone_name[zone - 1u], 0, ZONE_NAME_SIZE);
+    if (name == 0) {
+        return;
+    }
+    n = strlen(name);
+    if (n > ZONE_NAME_SIZE) {
+        n = ZONE_NAME_SIZE;
+    }
+    if (n > 0u) {
+        memcpy(host->zone_name[zone - 1u], name, n);
+    }
+}
+
+static void rs_v3_host_cache_clear_zones(void)
+{
+    PanelHostCache *host = PanelHostCache_Get();
+    if (host != 0) {
+        memset(host->zone_name, 0, sizeof(host->zone_name));
+    }
+}
+
+static void rs_v3_host_cache_put_device_at(uint16_t slot, const RsPanelV3DeviceItem *d)
+{
+    PanelHostCache *host = PanelHostCache_Get();
+    if (host == 0 || d == 0 || slot >= MAX_MCU_IN_BUS) {
+        return;
+    }
+    host->devices[slot].zone = d->zone;
+    host->devices[slot].l_adr = d->l_adr;
+    host->devices[slot].h_adr = d->h_adr;
+    host->devices[slot].d_type = d->d_type;
+    host->devices[slot].uid0 = d->uid0;
+    host->devices[slot].uid1 = d->uid1;
+    host->devices[slot].uid2 = d->uid2;
+}
+
+static void rs_v3_host_cache_clear_devices(void)
+{
+    PanelHostCache *host = PanelHostCache_Get();
+    if (host != 0) {
+        memset(host->devices, 0, sizeof(host->devices));
+    }
+}
+
+static void rs_v3_sync_host_cache_from_catalog(void)
+{
     uint8_t z;
     uint16_t i;
-    uint8_t slot = 0u;
 
-    memset(host->zone_name, 0, sizeof(host->zone_name));
+    rs_v3_host_cache_clear_zones();
     for (z = 1u; z <= PANEL_CATALOG_ZONE_SLOTS; z++) {
-        if (s_zone_name_valid[z] == 0u) {
-            continue;
-        }
-        {
-            size_t n = strlen(s_zone_name_by_id[z]);
-            if (n > ZONE_NAME_SIZE) {
-                n = ZONE_NAME_SIZE;
-            }
-            memcpy(host->zone_name[z - 1u], s_zone_name_by_id[z], n);
+        if (s_zone_name_valid[z] != 0u) {
+            rs_v3_host_cache_put_zone(z, s_zone_name_by_id[z]);
         }
     }
-
-    memset(host->devices, 0, sizeof(host->devices));
-    for (i = 0u; i < s_device_catalog_count && slot < MAX_MCU_IN_BUS; i++) {
-        const RsPanelV3DeviceItem *d = &s_device_catalog[i];
-        host->devices[slot].zone = d->zone;
-        host->devices[slot].l_adr = d->l_adr;
-        host->devices[slot].h_adr = d->h_adr;
-        host->devices[slot].d_type = d->d_type;
-        host->devices[slot].uid0 = d->uid0;
-        host->devices[slot].uid1 = d->uid1;
-        host->devices[slot].uid2 = d->uid2;
-        slot++;
+    rs_v3_host_cache_clear_devices();
+    for (i = 0u; i < s_device_catalog_count && i < MAX_MCU_IN_BUS; i++) {
+        rs_v3_host_cache_put_device_at(i, &s_device_catalog[i]);
     }
 }
 
@@ -680,62 +1230,64 @@ static void rs_v3_catalog_mark_flash_dirty(void)
 
 static void rs_v3_catalog_flash_save_if_dirty(void)
 {
-    PanelCatalogBlob blob;
+    /* static: PanelCatalogBlob ~2KB, стек панели Min_Stack=4K. */
+    static PanelCatalogBlob s_blob;
     uint8_t z;
     uint16_t i;
 
     if (s_catalog_flash_dirty == 0u) {
         return;
     }
-    memset(&blob, 0, sizeof(blob));
+    memset(&s_blob, 0, sizeof(s_blob));
     for (z = 1u; z <= PANEL_CATALOG_ZONE_SLOTS; z++) {
         if (s_zone_name_valid[z] == 0u) {
             continue;
         }
-        blob.zone_valid[z - 1u] = 1u;
-        memcpy(blob.zone_name[z - 1u], s_zone_name_by_id[z], RS_PANEL_V3_ZONE_NAME_LEN);
+        s_blob.zone_valid[z - 1u] = 1u;
+        memcpy(s_blob.zone_name[z - 1u], s_zone_name_by_id[z], RS_PANEL_V3_ZONE_NAME_LEN);
     }
-    blob.device_count = s_device_catalog_count;
+    s_blob.device_count = s_device_catalog_count;
     for (i = 0u; i < s_device_catalog_count && i < RS_PANEL_V3_MAX_CATALOG_MCU; i++) {
-        blob.devices[i] = s_device_catalog[i];
-        blob.devices[i].op = (uint8_t)RS_PANEL_V3_STREAM_OP_ADD;
+        s_blob.devices[i] = s_device_catalog[i];
+        s_blob.devices[i].op = (uint8_t)RS_PANEL_V3_STREAM_OP_ADD;
     }
-    blob.zones_crc = s_zones_crc;
-    blob.devices_crc = s_devices_crc;
-    PanelCatalog_FlashWrite(&blob);
+    s_blob.zones_crc = s_zones_crc;
+    s_blob.devices_crc = s_devices_crc;
+    /* Снять dirty до erase: при сбое записи не крутить HardFault-цикл. */
     s_catalog_flash_dirty = 0u;
+    PanelCatalog_FlashWrite(&s_blob);
 }
 
 static uint8_t rs_v3_catalog_flash_load(void)
 {
-    PanelCatalogBlob blob;
+    static PanelCatalogBlob s_blob;
     uint8_t z;
     uint16_t i;
 
-    if (PanelCatalog_FlashRead(&blob) == 0u) {
+    if (PanelCatalog_FlashRead(&s_blob) == 0u) {
         return 0u;
     }
     memset(s_zone_name_by_id, 0, sizeof(s_zone_name_by_id));
     memset(s_zone_name_valid, 0, sizeof(s_zone_name_valid));
     for (z = 1u; z <= PANEL_CATALOG_ZONE_SLOTS; z++) {
-        if (blob.zone_valid[z - 1u] == 0u) {
+        if (s_blob.zone_valid[z - 1u] == 0u) {
             continue;
         }
-        memcpy(s_zone_name_by_id[z], blob.zone_name[z - 1u], RS_PANEL_V3_ZONE_NAME_LEN);
+        memcpy(s_zone_name_by_id[z], s_blob.zone_name[z - 1u], RS_PANEL_V3_ZONE_NAME_LEN);
         s_zone_name_by_id[z][RS_PANEL_V3_ZONE_NAME_LEN - 1u] = '\0';
         s_zone_name_valid[z] = 1u;
     }
-    s_device_catalog_count = blob.device_count;
+    s_device_catalog_count = s_blob.device_count;
     if (s_device_catalog_count > RS_PANEL_V3_MAX_CATALOG_MCU) {
         s_device_catalog_count = RS_PANEL_V3_MAX_CATALOG_MCU;
     }
     memset(s_device_catalog, 0, sizeof(s_device_catalog));
     for (i = 0u; i < s_device_catalog_count; i++) {
-        s_device_catalog[i] = blob.devices[i];
+        s_device_catalog[i] = s_blob.devices[i];
     }
     rs_v3_recalc_catalog_crc();
     /* CRC в blob — контроль целостности; при расхождении считаем Flash битым. */
-    if (blob.zones_crc != s_zones_crc || blob.devices_crc != s_devices_crc) {
+    if (s_blob.zones_crc != s_zones_crc || s_blob.devices_crc != s_devices_crc) {
         memset(s_zone_name_by_id, 0, sizeof(s_zone_name_by_id));
         memset(s_zone_name_valid, 0, sizeof(s_zone_name_valid));
         memset(s_device_catalog, 0, sizeof(s_device_catalog));
@@ -818,13 +1370,41 @@ static const char *rs_v3_mcu_type_name(uint8_t d_type)
 
 static const char *rs_v3_ch_type_short(uint8_t v_d_type)
 {
-    switch (v_d_type) {
+    switch (v_d_type & 0x7Fu) {
     case DEVICE_DPT_TYPE: return "ДПТ";
     case DEVICE_IGNITER_TYPE: return "СП";
     case DEVICE_BUTTON_TYPE: return "КН";
     case DEVICE_LSWITCH_TYPE: return "КОН";
-    default: return "???";
+    default: return 0;
     }
+}
+
+/* Как ППКУ1 Fire_FormatZoneUiName: каталог зоны + « МКУ N ДПТk». */
+static void rs_v3_format_fire_zone_line(const RsPanelV3ZoneItem *z, char *out, uint16_t out_sz)
+{
+    char zone_name[RS_PANEL_V3_ZONE_NAME_LEN];
+    const char *ch_s;
+
+    if (out == 0 || out_sz == 0u) {
+        return;
+    }
+    out[0] = '\0';
+    if (z == 0) {
+        return;
+    }
+    rs_v3_zone_name(z->zone, zone_name, (uint16_t)sizeof(zone_name));
+    ch_s = (z->ch_type != 0u) ? rs_v3_ch_type_short(z->ch_type) : 0;
+    if (ch_s != 0 && z->mcu_h_adr != 0u) {
+        (void)snprintf(out, out_sz, "%s МКУ %u %s%u",
+                       zone_name, (unsigned)z->mcu_h_adr, ch_s,
+                       (unsigned)z->ch_l_adr);
+    } else if (ch_s != 0) {
+        (void)snprintf(out, out_sz, "%s %s%u",
+                       zone_name, ch_s, (unsigned)z->ch_l_adr);
+    } else {
+        (void)snprintf(out, out_sz, "%s", zone_name);
+    }
+    out[out_sz - 1u] = '\0';
 }
 
 static void rs_v3_format_ppku_sn(const RsPanelV3FaultEvtItem *fe, char *out, uint16_t out_sz)
@@ -973,8 +1553,11 @@ static void rs_v3_format_fault_line(const RsPanelV3FaultEvtItem *fe,
         } else if (fe->code == RS_PANEL_V3_FAULT_LINE_OTHER) {
             fault = "НЕИСП";
         }
-        (void)snprintf(title, title_sz, "%s %s%u", fault,
-                       rs_v3_ch_type_short(fe->ch_type), (unsigned)fe->ch_l_adr);
+        {
+            const char *ch_s = rs_v3_ch_type_short(fe->ch_type);
+            (void)snprintf(title, title_sz, "%s %s%u", fault,
+                           (ch_s != 0) ? ch_s : "?", (unsigned)fe->ch_l_adr);
+        }
         rs_v3_format_mku_fault_detail(fe, mcu, detail, detail_sz);
         break;
     }
@@ -1085,6 +1668,7 @@ static void rs_v3_apply_zone_names(const RsPanelV3ZoneNameItem *zn)
         /* Не ставить NEED_CATALOG: идёт частичный rewrite; CRC ведёт master. */
         s_catalog_ready = 0u;
         rs_v3_recalc_catalog_crc();
+        rs_v3_host_cache_clear_zones();
         rs_v3_catalog_mark_flash_dirty();
         return;
     }
@@ -1095,7 +1679,7 @@ static void rs_v3_apply_zone_names(const RsPanelV3ZoneNameItem *zn)
     s_zone_name_by_id[zn->zone][RS_PANEL_V3_ZONE_NAME_LEN - 1u] = '\0';
     s_zone_name_valid[zn->zone] = 1u;
     rs_v3_recalc_catalog_crc();
-    rs_v3_sync_host_cache_from_catalog();
+    rs_v3_host_cache_put_zone(zn->zone, s_zone_name_by_id[zn->zone]);
     rs_v3_catalog_mark_flash_dirty();
     /* Имя зоны могло прийти после FAULT_SET — пересобрать нижнюю строку. */
     if (s_active_fault_count > 0u) {
@@ -1113,14 +1697,16 @@ static void rs_v3_apply_devices(const RsPanelV3DeviceItem *dev)
         s_device_catalog_count = 0u;
         s_catalog_ready = 0u;
         rs_v3_recalc_catalog_crc();
+        rs_v3_host_cache_clear_devices();
         rs_v3_catalog_mark_flash_dirty();
         return;
     }
     if (s_device_catalog_count < RS_PANEL_V3_MAX_CATALOG_MCU) {
-        s_device_catalog[s_device_catalog_count] = *dev;
+        const uint16_t slot = s_device_catalog_count;
+        s_device_catalog[slot] = *dev;
         s_device_catalog_count++;
         rs_v3_recalc_catalog_crc();
-        rs_v3_sync_host_cache_from_catalog();
+        rs_v3_host_cache_put_device_at(slot, dev);
         rs_v3_catalog_mark_flash_dirty();
         /* Каталог МКУ даёт zone для detail — обновить бегущую при активных fault. */
         if (s_active_fault_count > 0u) {
@@ -1140,8 +1726,6 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
         s_fault_pre_clear_count = s_active_fault_count;
         s_active_fault_count = 0u;
         memset(s_active_faults, 0, sizeof(s_active_faults));
-        /* Список пуст — LED_ERR гасим сразу (sync тоже смотрит на count, не HAS_FAULTS). */
-        Led_Set(LED_ERR, 0u);
         /* Конец фазы faults / каталога: READY, CRC зон/МКУ уже актуальны. */
         s_catalog_ready = 1u;
         s_rsp_flags &= (uint8_t)(~RS_PANEL_V3_RSP_FLAG_NEED_CATALOG);
@@ -1150,16 +1734,20 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
         /* Не пушить UI сразу: держим прежний экран до пакета SET (quiet-timer).
          * Иначе АВАРИЯ n/n скачет 0→placeholder→1→2… */
         if (s_has_faults == 0u) {
+            Led_Set(LED_ERR, 0u);
             rs_v3_push_faults_ui();
             Beeper_StopPattern();
             s_fault_sound_phase = RS_V3_FS_IDLE;
             s_fault_sound_deadline_ms = 0u;
             s_fault_sound_resync = 0u;
             s_fault_pre_clear_count = 0u;
+            s_fault_clear_safe_ms = 0u;
         } else {
-            /* Resync: звук не трогаем на каждом SET — решим после quiet. */
+            /* Resync: НЕ гасить LED_ERR / не зажигать LED_NORM — иначе миг «НОРМА»
+             * между CLEAR_ALL и SET при уходе одной из нескольких неисправностей. */
             s_fault_sound_resync = 1u;
             s_fault_resync_wait_ms = HAL_GetTick();
+            s_fault_clear_safe_ms = 0u;
             rs_v3_mark_fault_ui_dirty();
         }
         return;
@@ -1240,15 +1828,87 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
 static void rs_v3_apply_zones(const RsPanelV3Zones *z)
 {
     uint8_t i;
+    const uint8_t from_host = (z != 0 && z != &s_zones) ? 1u : 0u;
     if (z == 0) {
         return;
     }
-    s_zones = *z;
+    /* Тот же снимок, что уже в s_zones — не format/UI/sync.
+     * При пожаре POLL ~40 мс, remaining_s меняется раз в секунду. */
+    if (from_host != 0u && s_zones_valid != 0u) {
+        uint8_t n = z->count;
+        if (n > RS_PANEL_V3_MAX_ZONES) {
+            n = RS_PANEL_V3_MAX_ZONES;
+        }
+        if (s_zones.count == z->count &&
+            (n == 0u ||
+             memcmp(s_zones.items, z->items,
+                    (size_t)n * sizeof(RsPanelV3ZoneItem)) == 0)) {
+            return;
+        }
+    }
+    /* Статусы/таймер на экране — только снимок хоста (без optimistic). */
+    if (from_host != 0u) {
+        /* START_ALL: count==0 не значит «пуск выполнен». */
+        if (z->count > 0u && rs_v3_zones_still_need_start(z) == 0u) {
+            if (s_start_all_confirm_until_ms != 0u) {
+                s_start_all_confirm_until_ms = 0u;
+                s_start_all_confirm_retry_ms = 0u;
+                s_start_all_ack_done = 0u;
+            }
+        }
+        /* START_SP: гасить по ZONES только после ACK (до ACK idle ZONES
+         * иначе убивают доставку — Fire_OnPanelStartSp «пропускает»). */
+        if (s_start_sp_confirm_until_ms != 0u &&
+            s_start_sp_ack_done != 0u &&
+            rs_v3_start_sp_should_retry_zones(z, 1u) == 0u) {
+            s_start_sp_confirm_until_ms = 0u;
+            s_start_sp_confirm_retry_ms = 0u;
+        }
+        s_zones_apply_gen++;
+        if (s_zones_apply_gen == 0u) {
+            s_zones_apply_gen = 1u;
+        }
+        /* STOP: idle ZONES (= goal_met) не гасить до ACK — иначе lost EVT. */
+        if (s_stop_confirm_until_ms != 0u &&
+            s_stop_ack_done != 0u &&
+            rs_v3_zones_stop_goal_met(z) != 0u) {
+            s_stop_confirm_until_ms = 0u;
+            s_stop_confirm_retry_ms = 0u;
+        }
+        s_zones = *z;
+    } else if (s_zones_valid == 0u) {
+        s_zones = *z;
+    }
     s_zones_valid = 1u;
-    for (i = 0u; i < z->count && i < RS_PANEL_V3_MAX_ZONES; i++) {
-        if (z->items[i].status == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
-            z->items[i].status == (uint8_t)RS_PANEL_V3_ZONE_PAUSED) {
-            s_local_timer_s[i] = z->items[i].remaining_s;
+    /* 1 зона → всегда она; 2+ → листание или 0 (все); выбор невалиден → 0. */
+    if (s_zones.count == 0u) {
+        s_selected_zone = 0u;
+    } else if (s_zones.count == 1u) {
+        s_selected_zone = s_zones.items[0].zone;
+    } else if (s_selected_zone != 0u) {
+        uint8_t found = 0u;
+        uint8_t j;
+        for (j = 0u; j < s_zones.count && j < RS_PANEL_V3_MAX_ZONES; j++) {
+            if (s_zones.items[j].zone == s_selected_zone) {
+                found = 1u;
+                break;
+            }
+        }
+        if (found == 0u) {
+            s_selected_zone = 0u;
+        }
+    }
+    for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+        if (s_zones.items[i].status ==
+            (uint8_t)RS_PANEL_V3_ZONE_EXTINGUISHING) {
+            s_local_timer_s[i] = 0u;
+        } else if (from_host != 0u &&
+                   (s_zones.items[i].status ==
+                        (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
+                    s_zones.items[i].status ==
+                        (uint8_t)RS_PANEL_V3_ZONE_PAUSED)) {
+            /* Таймер экрана = remaining хоста (при PAUSED хост не уменьшает). */
+            s_local_timer_s[i] = s_zones.items[i].remaining_s;
         }
     }
     /* Push into existing UI bridge as MAIN_FIRE-like snapshot. */
@@ -1256,7 +1916,7 @@ static void rs_v3_apply_zones(const RsPanelV3Zones *z)
         char names[16][ZONE_NAME_SIZE + 1];
         uint8_t modes[16];
         uint8_t rems[16];
-        uint8_t n = z->count;
+        uint8_t n = s_zones.count;
         uint8_t active = (n > 0u) ? 1u : 0u;
         uint8_t mode = 0u;
         uint8_t rem = 0u;
@@ -1265,34 +1925,38 @@ static void rs_v3_apply_zones(const RsPanelV3Zones *z)
         }
         memset(names, 0, sizeof(names));
         for (i = 0u; i < n; i++) {
-            if (z->items[i].name[0] != '\0') {
-                strncpy(names[i], z->items[i].name, ZONE_NAME_SIZE);
-                names[i][ZONE_NAME_SIZE] = '\0';
-            } else {
-                /* Как ППКУ1: бегущая — имя зоны (каталог ZONE_NAMES), не ППКУ S/N. */
-                rs_v3_zone_name(z->items[i].zone, names[i], (uint16_t)sizeof(names[i]));
-            }
-            modes[i] = z->items[i].status;
+            /* Имя зоны из каталога; МКУ/канал — из ZONES snapshot. */
+            rs_v3_format_fire_zone_line(&s_zones.items[i], names[i],
+                                       (uint16_t)sizeof(names[i]));
+            modes[i] = s_zones.items[i].status;
             rems[i] = s_local_timer_s[i];
             if (i == 0u) {
                 mode = modes[i];
                 rem = rems[i];
             }
         }
-        PanelUiBridge_SetFireStatus(active, mode, rem, n, names, modes, rems);
+        /* Не SetFireStatus из UART IRQ: при пожаре ZONES в каждом POLL,
+         * TouchGFX в OnPoll срывает turnaround → START_SP до Fire_OnPanelStartSp
+         * пропускается или приходит через секунды. Очередь → ProcessDeferredUi. */
+        RsPanelEndpoint_QueueFireUi(active, mode, rem, n, names, modes, rems);
     }
     rs_v3_sync_fire_indication();
 }
 
-uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
+static uint8_t rs_v3_poll_decode(const uint8_t *payload, uint16_t len,
+                                 RsPanelV3Poll *out)
 {
-    RsPanelV3Poll poll;
-    if (payload == 0 || len < 1u || payload[0] != RS_PANEL_V3_VERSION) {
+    if (payload == 0 || out == 0 || len < 1u || payload[0] != RS_PANEL_V3_VERSION) {
         return 0u;
     }
-    if (RsPanelV3_DecodePoll(payload, len, &poll) == 0u) {
+    if (RsPanelV3_DecodePoll(payload, len, out) == 0u) {
         return 0u;
     }
+    return 1u;
+}
+
+static void rs_v3_mark_v3_active(void)
+{
     if (s_v3_active == 0u) {
         s_v3_active = 1u;
         /* После Led_Init / перехода в v3 — снова дежурная надпись ПУСК ОБЩИЙ. */
@@ -1300,15 +1964,153 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
             rs_v3_restore_start_all_idle_leds();
         }
     }
+}
 
-    if (poll.ack.result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
-        poll.ack.seq != 0u && poll.ack.seq == s_event.seq) {
-        s_event.seq = 0u;
-        s_event.type = (uint8_t)RS_PANEL_V3_EVT_NONE;
-        rs_v3_evt_retry_sticky();
-        rs_v3_evt_flush_queue();
+/* Только TAG_ACK из POLL — без DecodePoll/RsPanelV3Poll на стеке IRQ.
+ * ZONES/TIME/… разбирает OnPollBody в main. */
+static uint8_t rs_v3_poll_extract_acks(const uint8_t *payload, uint16_t len,
+                                       RsPanelV3Ack *out_ack,
+                                       RsPanelV3Ack *out_ack_crit)
+{
+    uint16_t pos = 0u;
+    uint8_t ack_n = 0u;
+    if (payload == 0 || len < 1u || payload[0] != RS_PANEL_V3_VERSION) {
+        return 0u;
+    }
+    if (out_ack != 0) {
+        memset(out_ack, 0, sizeof(*out_ack));
+    }
+    if (out_ack_crit != 0) {
+        memset(out_ack_crit, 0, sizeof(*out_ack_crit));
+    }
+    pos = 1u;
+    while (pos < len) {
+        uint8_t tag;
+        uint16_t body_len;
+        uint16_t body_start;
+        uint16_t body_end;
+        tag = payload[pos++];
+        if (tag == (uint8_t)RS_PANEL_V3_TAG_ZONES ||
+            tag == (uint8_t)RS_PANEL_V3_TAG_EVENT_REPLY) {
+            if ((uint16_t)(pos + 2u) > len) {
+                return 0u;
+            }
+            body_len = (uint16_t)payload[pos] | ((uint16_t)payload[pos + 1u] << 8);
+            pos = (uint16_t)(pos + 2u);
+        } else {
+            if (pos >= len) {
+                return 0u;
+            }
+            body_len = payload[pos++];
+        }
+        body_start = pos;
+        body_end = (uint16_t)(body_start + body_len);
+        if (body_end > len) {
+            return 0u;
+        }
+        if (tag == (uint8_t)RS_PANEL_V3_TAG_ACK && body_len >= 2u) {
+            if (ack_n == 0u && out_ack != 0) {
+                out_ack->seq = payload[body_start];
+                out_ack->result = payload[body_start + 1u];
+                ack_n = 1u;
+            } else if (ack_n == 1u && out_ack_crit != 0) {
+                out_ack_crit->seq = payload[body_start];
+                out_ack_crit->result = payload[body_start + 1u];
+                ack_n = 2u;
+            }
+        }
+        pos = body_end;
+    }
+    return 1u;
+}
+
+static void rs_v3_apply_poll_acks_raw(RsPanelV3Ack *ack, RsPanelV3Ack *ack_crit)
+{
+    if (ack == 0 || ack_crit == 0) {
+        return;
+    }
+    /* Compat: один TAG_ACK (только critical на проводе) старый encode клал
+     * в ack. Если seq совпал с critical и не с ordinary — это crit ACK. */
+    if (ack_crit->result == (uint8_t)RS_PANEL_V3_ACK_NONE &&
+        ack->result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
+        ack->seq != 0u &&
+        s_event_crit.seq != 0u &&
+        ack->seq == s_event_crit.seq &&
+        ack->seq != s_event.seq) {
+        *ack_crit = *ack;
+        ack->seq = 0u;
+        ack->result = (uint8_t)RS_PANEL_V3_ACK_NONE;
     }
 
+    /* Ordinary ACK — только ordinary lane (журнал/меню/wifi/…). */
+    if (ack->result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
+        ack->seq != 0u && ack->seq == s_event.seq) {
+        rs_v3_evt_clear_inflight();
+        rs_v3_evt_retry_sticky();
+        rs_v3_evt_flush_queue();
+        rs_v3_evt_flush_crit();
+    }
+
+    /* Critical ACK — fire-ctrl (START_SP/STOP/START_ALL/FIRE_RESET). */
+    if (ack_crit->result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
+        ack_crit->seq != 0u && ack_crit->seq == s_event_crit.seq) {
+        const uint8_t acked_type = s_event_crit.type;
+        const uint8_t acked_seq = ack_crit->seq;
+        rs_v3_evt_clear_inflight_crit();
+        if (acked_type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT) {
+            /* ACK есть; ретраи COMMIT — до EXTINGUISHING в ZONES (как ПУСК СП). */
+            s_start_all_ack_done = 1u;
+            s_start_all_evt_pending = 0u;
+            /* >>> RS_V3_DBG_START_ALL_LAG BEGIN */
+            {
+                const uint32_t now = HAL_GetTick();
+                g_rs_v3_dbg_sa.ack_ms = now;
+                g_rs_v3_dbg_sa.ack_seq = acked_seq;
+                if (g_rs_v3_dbg_sa.post_ms != 0u) {
+                    g_rs_v3_dbg_sa.dt_post_to_ack_ms = now - g_rs_v3_dbg_sa.post_ms;
+                }
+                if (g_rs_v3_dbg_sa.first_build_ms != 0u) {
+                    g_rs_v3_dbg_sa.dt_build_to_ack_ms =
+                        now - g_rs_v3_dbg_sa.first_build_ms;
+                }
+                rs_v3_dbg_sa_mark(3u);
+            }
+            /* >>> RS_V3_DBG_START_ALL_LAG END */
+        } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_START_SP) {
+            /* ACK ≠ тушение на хосте. Не постить новый seq здесь:
+             * s_zones ещё старые (apply_zones ниже в этом же POLL) — при FIRE1
+             * should_retry==1 всегда → лишний EVT до свежих ZONES.
+             * Ретраи: confirm-loop 200 мс / apply_zones после host-ZONES. */
+            s_start_sp_ack_done = 1u;
+            s_start_sp_evt_pending = 0u;
+            if (s_start_sp_confirm_until_ms != 0u &&
+                rs_v3_start_sp_should_retry() == 0u) {
+                /* Idle / эффект уже в кэше зон — одного post+ACK достаточно. */
+                s_start_sp_confirm_until_ms = 0u;
+                s_start_sp_confirm_retry_ms = 0u;
+            }
+        } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH) {
+            /* ACK = Fire_OnPanelStopLaunch вызван. Дальше без авто-EVT (toggle). */
+            s_stop_ack_done = 1u;
+            s_stop_launch_evt_pending = 0u;
+            s_stop_confirm_retry_ms = 0u;
+            if (s_zones_valid != 0u && rs_v3_zones_stop_goal_met(&s_zones) != 0u) {
+                s_stop_confirm_until_ms = 0u;
+            }
+        } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET) {
+            s_fire_reset_evt_pending = 0u;
+        }
+        rs_v3_evt_retry_sticky();
+        rs_v3_evt_flush_queue();
+        rs_v3_evt_flush_crit();
+    }
+}
+
+static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
+{
+    if (poll == 0) {
+        return;
+    }
     {
         const uint8_t prev_ready = s_sys_ready;
         const uint8_t prev_cfg = s_config_active;
@@ -1316,26 +2118,26 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
         /* addr_scan probe: только SYS с flags=0, без TIME/каталога — не сбрасывать
          * SYS_READY (иначе «ПРОВЕРКА» навечно, пока мастер не сделал ADD). */
         const uint8_t scan_probe =
-            (poll.sys.flags == 0u &&
-             poll.has_time == 0u &&
-             poll.has_zones == 0u &&
-             poll.has_zone_names == 0u &&
-             poll.has_devices == 0u &&
-             poll.has_fault_evt == 0u &&
-             poll.has_fault_op == 0u &&
-             poll.has_config == 0u &&
-             poll.has_event_reply == 0u) ? 1u : 0u;
+            (poll->sys.flags == 0u &&
+             poll->has_time == 0u &&
+             poll->has_zones == 0u &&
+             poll->has_zone_names == 0u &&
+             poll->has_devices == 0u &&
+             poll->has_fault_evt == 0u &&
+             poll->has_fault_op == 0u &&
+             poll->has_config == 0u &&
+             poll->has_event_reply == 0u) ? 1u : 0u;
 
         if (scan_probe == 0u) {
-            s_sys_ready = ((poll.sys.flags & RS_PANEL_V3_SYS_READY) != 0u) ? 1u : 0u;
+            s_sys_ready = ((poll->sys.flags & RS_PANEL_V3_SYS_READY) != 0u) ? 1u : 0u;
             s_fire_active =
-                ((poll.sys.flags & RS_PANEL_V3_SYS_FIRE_ACTIVE) != 0u) ? 1u : 0u;
+                ((poll->sys.flags & RS_PANEL_V3_SYS_FIRE_ACTIVE) != 0u) ? 1u : 0u;
             s_config_active =
-                ((poll.sys.flags & RS_PANEL_V3_SYS_CONFIG_ACTIVE) != 0u) ? 1u : 0u;
+                ((poll->sys.flags & RS_PANEL_V3_SYS_CONFIG_ACTIVE) != 0u) ? 1u : 0u;
             s_has_faults =
-                ((poll.sys.flags & RS_PANEL_V3_SYS_HAS_FAULTS) != 0u) ? 1u : 0u;
+                ((poll->sys.flags & RS_PANEL_V3_SYS_HAS_FAULTS) != 0u) ? 1u : 0u;
             s_power_input_fault =
-                ((poll.sys.flags & RS_PANEL_V3_SYS_POWER_INPUT_FAULT) != 0u) ? 1u : 0u;
+                ((poll->sys.flags & RS_PANEL_V3_SYS_POWER_INPUT_FAULT) != 0u) ? 1u : 0u;
 
             if (prev_fire != s_fire_active) {
                 if (s_fire_active != 0u) {
@@ -1348,9 +2150,9 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
             {
                 const uint8_t prev_beep = PanelHostCache_GetConst()->beep;
                 const uint8_t sound_on =
-                    ((poll.sys.flags & RS_PANEL_V3_SYS_SOUND_ON) != 0u) ? 1u : 0u;
+                    ((poll->sys.flags & RS_PANEL_V3_SYS_SOUND_ON) != 0u) ? 1u : 0u;
                 const uint8_t sound_blk =
-                    ((poll.sys.flags & RS_PANEL_V3_SYS_SOUND_BLOCKED) != 0u) ? 1u : 0u;
+                    ((poll->sys.flags & RS_PANEL_V3_SYS_SOUND_BLOCKED) != 0u) ? 1u : 0u;
                 PanelHostCache_ApplySoundState(sound_on, sound_blk);
                 if (prev_beep == 0u && sound_on != 0u) {
                     if (s_fire_active != 0u) {
@@ -1366,9 +2168,9 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
              * локальный «Вкл» кадром, собранным до обработки EVT. */
             if (s_event.seq == 0u || s_event.type != (uint8_t)RS_PANEL_V3_EVT_WIFI_SET) {
                 const uint8_t wifi_on =
-                    ((poll.sys.flags & RS_PANEL_V3_SYS_WIFI_ON) != 0u) ? 1u : 0u;
+                    ((poll->sys.flags & RS_PANEL_V3_SYS_WIFI_ON) != 0u) ? 1u : 0u;
                 const uint8_t wifi_link =
-                    ((poll.sys.flags & RS_PANEL_V3_SYS_WIFI_LINK) != 0u) ? 1u : 0u;
+                    ((poll->sys.flags & RS_PANEL_V3_SYS_WIFI_LINK) != 0u) ? 1u : 0u;
                 const uint8_t session = (uint8_t)(wifi_on != 0u || wifi_link != 0u);
                 PanelConnectionCache_SetRemoteStatus(wifi_on,
                                                      PanelHostCache_GetConst()->rs485_on);
@@ -1391,7 +2193,7 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
                 PanelJournalCache_OnSysReady();
             }
             /* Сессия конфигурации закончилась — снять оверлей (иначе tick блочит UI). */
-            if (prev_cfg != 0u && s_config_active == 0u && poll.has_config == 0u) {
+            if (prev_cfg != 0u && s_config_active == 0u && poll->has_config == 0u) {
                 MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, 0u);
             }
         }
@@ -1401,15 +2203,15 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
         MenuUi_SetMainScreenActive(1u);
     }
 
-    if (poll.has_time != 0u) {
+    if (poll->has_time != 0u) {
         RTC_TimeTypeDef time = {0};
         RTC_DateTypeDef date = {0};
-        time.Hours = poll.time.hour;
-        time.Minutes = poll.time.min;
-        time.Seconds = poll.time.sec;
-        date.Date = poll.time.day;
-        date.Month = poll.time.month;
-        date.Year = poll.time.year;
+        time.Hours = poll->time.hour;
+        time.Minutes = poll->time.min;
+        time.Seconds = poll->time.sec;
+        date.Date = poll->time.day;
+        date.Month = poll->time.month;
+        date.Year = poll->time.year;
         date.WeekDay = RTC_WEEKDAY_MONDAY;
         (void)HAL_RTC_SetTime(&hrtc, &time, RTC_FORMAT_BIN);
         (void)HAL_RTC_SetDate(&hrtc, &date, RTC_FORMAT_BIN);
@@ -1417,21 +2219,14 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
         RtcCache_Refresh();
     }
 
-    if (poll.has_zone_names != 0u) {
-        rs_v3_apply_zone_names(&poll.zone_names);
-    }
-    if (poll.has_devices != 0u) {
-        rs_v3_apply_devices(&poll.device);
-    }
-    if (poll.has_fault_evt != 0u) {
-        rs_v3_apply_fault_evt(&poll.fault_evt);
-    }
-    if (poll.has_zones != 0u) {
-        rs_v3_apply_zones(&poll.zones);
+    /* ZONE_NAMES/DEVICES/FAULT_EVT — OnPollStream в UART IRQ (не здесь):
+     * иначе повторный ADD и потеря кадров в одном deferred-слоте. */
+    if (poll->has_zones != 0u) {
+        rs_v3_apply_zones(&poll->zones);
     }
 
-    if (poll.has_event_reply != 0u) {
-        const RsPanelV3EventReply *er = &poll.event_reply;
+    if (poll->has_event_reply != 0u) {
+        const RsPanelV3EventReply *er = &poll->event_reply;
         if (er->type == (uint8_t)RS_PANEL_V3_EVT_JOURNAL_COUNT &&
             er->payload_len >= 4u) {
             /* Не SetList(..., 0 items) — это стирало окно до прихода JOURNAL_GET. */
@@ -1456,23 +2251,23 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
             PanelConnectionCache_SetRemoteStatus(EspManager_IsUserWifiOn(),
                                                  (er->payload[0] != 0u) ? 1u : 0u);
         }
-        if (s_evt_q_n == 0u && s_start_all_evt_pending == 0u &&
-            s_fire_reset_evt_pending == 0u &&
-            (s_event.seq == 0u || rs_v3_evt_is_fire_ctrl(s_event.type) == 0u)) {
+        /* Prefetch журнала — только ordinary idle; critical может быть занят. */
+        if (s_fire_active == 0u &&
+            s_event.seq == 0u && s_evt_q_n == 0u) {
             PanelJournalCache_PrefetchProcess();
         }
     }
 
-    if (poll.has_config != 0u) {
-        if (poll.config.phase == (uint8_t)RS_PANEL_V3_CFG_SUCCESS) {
+    if (poll->has_config != 0u) {
+        if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_SUCCESS) {
             Beeper_StartPulseTrain(100u, 100u, 3u, 0u);
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_SUCCESS, 100u);
-        } else if (poll.config.phase == (uint8_t)RS_PANEL_V3_CFG_FAIL) {
+        } else if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_FAIL) {
             Beeper_StartPulseTrain(SOUND_FAULT_DUTY_ON_MS, SOUND_FAULT_DUTY_OFF_MS,
                                    SOUND_FAULT_DUTY_PULSES, 0u);
-            MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, poll.config.percent);
-        } else if (poll.config.phase == (uint8_t)RS_PANEL_V3_CFG_RUNNING) {
-            MenuConfig_SetRemoteStatus(MENU_CFG_STATE_RECEIVING, poll.config.percent);
+            MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, poll->config.percent);
+        } else if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_RUNNING) {
+            MenuConfig_SetRemoteStatus(MENU_CFG_STATE_RECEIVING, poll->config.percent);
         } else {
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, 0u);
         }
@@ -1481,28 +2276,189 @@ uint8_t RsPanelV3Slave_OnPoll(const uint8_t *payload, uint16_t len)
     if (s_sys_ready != 0u && s_fault_ui_dirty == 0u) {
         if (s_has_faults != 0u && s_active_fault_count == 0u) {
             /* Ждём FAULT_SET — без placeholder «НЕИСП». */
+            s_fault_clear_safe_ms = 0u;
             rs_v3_wait_fault_evt_ui();
         } else if (s_has_faults == 0u &&
+                   s_fault_sound_resync == 0u &&
                    (s_active_fault_count > 0u ||
                     s_fault_placeholder_active != 0u ||
                     s_fault_ui_pushed_count > 0u)) {
-            /* HAS_FAULTS=0, а список/UI ещё живы: master мог не дослать CLEAR
-             * (CRC уже empty после частичного CLEAR). Safety — очистить локально. */
-            if (s_active_fault_count > 0u) {
-                s_active_fault_count = 0u;
-                memset(s_active_faults, 0, sizeof(s_active_faults));
-                rs_v3_recalc_catalog_crc();
-                Led_Set(LED_ERR, 0u);
+            /* HAS_FAULTS=0, а список/UI ещё живы. Debounce: один POLL с флагом 0
+             * при CLEAR_ALL→SET давал миг «НОРМА» при оставшихся неисправностях. */
+            const uint32_t now_safe = HAL_GetTick();
+            if (s_fault_clear_safe_ms == 0u) {
+                s_fault_clear_safe_ms = now_safe;
+            } else if ((now_safe - s_fault_clear_safe_ms) >= RS_V3_FAULT_CLEAR_SAFE_MS) {
+                if (s_active_fault_count > 0u) {
+                    s_active_fault_count = 0u;
+                    memset(s_active_faults, 0, sizeof(s_active_faults));
+                    rs_v3_recalc_catalog_crc();
+                    Led_Set(LED_ERR, 0u);
+                }
+                s_fault_placeholder_active = 0u;
+                s_fault_sound_resync = 0u;
+                s_fault_pre_clear_count = 0u;
+                s_fault_clear_safe_ms = 0u;
+                Beeper_StopPattern();
+                s_fault_sound_phase = RS_V3_FS_IDLE;
+                s_fault_sound_deadline_ms = 0u;
+                rs_v3_push_faults_ui();
             }
-            s_fault_placeholder_active = 0u;
-            s_fault_sound_resync = 0u;
-            s_fault_pre_clear_count = 0u;
-            Beeper_StopPattern();
-            s_fault_sound_phase = RS_V3_FS_IDLE;
-            s_fault_sound_deadline_ms = 0u;
-            rs_v3_push_faults_ui();
+        } else {
+            s_fault_clear_safe_ms = 0u;
         }
     }
+}
+
+uint8_t RsPanelV3Slave_OnPollAcks(const uint8_t *payload, uint16_t len)
+{
+    RsPanelV3Ack ack;
+    RsPanelV3Ack ack_crit;
+    /* Не DecodePoll: RsPanelV3Poll на стеке UART IRQ при ZONES раздувает стек
+     * и при пожаре ломает доставку event_crit на мастер. */
+    if (rs_v3_poll_extract_acks(payload, len, &ack, &ack_crit) == 0u) {
+        return 0u;
+    }
+    rs_v3_mark_v3_active();
+    rs_v3_apply_poll_acks_raw(&ack, &ack_crit);
+    return 1u;
+}
+
+/* Каталог/FAULT из POLL в UART IRQ — без RsPanelV3Poll (~большой стек) и без
+ * deferred-очереди (CLEAR/ADD/FAULT_SET больше не затираются). */
+uint8_t RsPanelV3Slave_OnPollStream(const uint8_t *payload, uint16_t len)
+{
+    uint16_t pos = 0u;
+    if (payload == 0 || len < 1u || payload[0] != RS_PANEL_V3_VERSION) {
+        return 0u;
+    }
+    rs_v3_mark_v3_active();
+    pos = 1u;
+    while (pos < len) {
+        uint8_t tag;
+        uint16_t body_len;
+        uint16_t body_start;
+        uint16_t body_end;
+        tag = payload[pos++];
+        if (tag == (uint8_t)RS_PANEL_V3_TAG_ZONES ||
+            tag == (uint8_t)RS_PANEL_V3_TAG_EVENT_REPLY) {
+            if ((uint16_t)(pos + 2u) > len) {
+                return 0u;
+            }
+            body_len = (uint16_t)payload[pos] | ((uint16_t)payload[pos + 1u] << 8);
+            pos = (uint16_t)(pos + 2u);
+        } else {
+            if (pos >= len) {
+                return 0u;
+            }
+            body_len = payload[pos++];
+        }
+        body_start = pos;
+        body_end = (uint16_t)(body_start + body_len);
+        if (body_end > len) {
+            return 0u;
+        }
+
+        if (tag == (uint8_t)RS_PANEL_V3_TAG_ZONE_NAMES && body_len >= 1u) {
+            RsPanelV3ZoneNameItem zn;
+            uint16_t zp = body_start;
+            uint8_t op = payload[zp++];
+            memset(&zn, 0, sizeof(zn));
+            zn.op = op;
+            if (op == (uint8_t)RS_PANEL_V3_STREAM_OP_ADD &&
+                (uint16_t)(zp + 2u) <= body_end) {
+                uint8_t name_len;
+                zn.zone = payload[zp++];
+                name_len = payload[zp++];
+                if (name_len > 0u && (uint16_t)(zp + name_len) <= body_end) {
+                    uint16_t copy = name_len;
+                    if (copy >= RS_PANEL_V3_ZONE_NAME_LEN) {
+                        copy = (uint16_t)(RS_PANEL_V3_ZONE_NAME_LEN - 1u);
+                    }
+                    memcpy(zn.name, &payload[zp], copy);
+                    zn.name[copy] = '\0';
+                }
+            }
+            rs_v3_apply_zone_names(&zn);
+        } else if (tag == (uint8_t)RS_PANEL_V3_TAG_DEVICES && body_len >= 1u) {
+            RsPanelV3DeviceItem d;
+            uint16_t dp = body_start;
+            uint8_t i;
+            memset(&d, 0, sizeof(d));
+            d.op = payload[dp++];
+            if (d.op == (uint8_t)RS_PANEL_V3_STREAM_OP_ADD) {
+                /* После op: d_type,h,l,zone (4) + uid0..2 (12) + n_ch (1) = 17.
+                 * Каналы: n_ch × 2. Неполный TLV — не apply (без «затычек»). */
+                if ((uint16_t)(dp + 17u) > body_end) {
+                    pos = body_end;
+                    continue;
+                }
+                d.d_type = payload[dp++];
+                d.h_adr = payload[dp++];
+                d.l_adr = payload[dp++];
+                d.zone = payload[dp++];
+                d.uid0 = (uint32_t)payload[dp] |
+                         ((uint32_t)payload[dp + 1u] << 8) |
+                         ((uint32_t)payload[dp + 2u] << 16) |
+                         ((uint32_t)payload[dp + 3u] << 24);
+                dp = (uint16_t)(dp + 4u);
+                d.uid1 = (uint32_t)payload[dp] |
+                         ((uint32_t)payload[dp + 1u] << 8) |
+                         ((uint32_t)payload[dp + 2u] << 16) |
+                         ((uint32_t)payload[dp + 3u] << 24);
+                dp = (uint16_t)(dp + 4u);
+                d.uid2 = (uint32_t)payload[dp] |
+                         ((uint32_t)payload[dp + 1u] << 8) |
+                         ((uint32_t)payload[dp + 2u] << 16) |
+                         ((uint32_t)payload[dp + 3u] << 24);
+                dp = (uint16_t)(dp + 4u);
+                d.n_ch = payload[dp++];
+                if (d.n_ch > RS_PANEL_V3_MAX_MCU_CHANNELS) {
+                    d.n_ch = RS_PANEL_V3_MAX_MCU_CHANNELS;
+                }
+                if ((uint16_t)(dp + (uint16_t)d.n_ch * 2u) > body_end) {
+                    pos = body_end;
+                    continue;
+                }
+                for (i = 0u; i < d.n_ch; i++) {
+                    d.ch[i].ch_type = payload[dp++];
+                    d.ch[i].ch_l_adr = payload[dp++];
+                }
+            }
+            rs_v3_apply_devices(&d);
+        } else if (tag == (uint8_t)RS_PANEL_V3_TAG_FAULT_EVT && body_len >= 1u) {
+            RsPanelV3FaultEvtItem fe;
+            uint16_t fp = body_start;
+            uint8_t op = payload[fp++];
+            memset(&fe, 0, sizeof(fe));
+            fe.op = op;
+            if (op != (uint8_t)RS_PANEL_V3_FAULT_EVT_CLEAR_ALL) {
+                uint16_t blen = (uint16_t)(body_end - fp);
+                if (RsPanelV3_FaultEvtDecodeBody(&payload[fp], blen, &fe) == 0u) {
+                    pos = body_end;
+                    continue;
+                }
+                fe.op = op;
+            }
+            rs_v3_apply_fault_evt(&fe);
+        }
+        pos = body_end;
+    }
+    return 1u;
+}
+
+uint8_t RsPanelV3Slave_OnPollBody(const uint8_t *payload, uint16_t len)
+{
+    RsPanelV3Poll poll;
+    if (rs_v3_poll_decode(payload, len, &poll) == 0u) {
+        return 0u;
+    }
+    rs_v3_mark_v3_active();
+    /* Каталог уже в OnPollStream — не apply повторно. */
+    poll.has_zone_names = 0u;
+    poll.has_devices = 0u;
+    poll.has_fault_evt = 0u;
+    rs_v3_apply_poll_body(&poll);
     return 1u;
 }
 
@@ -1511,12 +2467,32 @@ uint16_t RsPanelV3Slave_BuildRsp(uint8_t *dst, uint16_t dst_size)
     RsPanelV3Rsp rsp;
     rs_v3_evt_retry_sticky();
     rs_v3_evt_flush_queue();
+    rs_v3_evt_flush_crit();
     memset(&rsp, 0, sizeof(rsp));
     rsp.event = s_event;
+    rsp.event_crit = s_event_crit;
+    /* Ordinary пуст — продублировать fire-ctrl в event (первый слот RSP).
+     * Иначе при любом сбое decode event_crit мастер не видит START_SP. */
+    if (s_event.seq == 0u && s_event_crit.seq != 0u) {
+        rsp.event = s_event_crit;
+    }
     rsp.zones_crc = s_zones_crc;
     rsp.devices_crc = s_devices_crc;
     rsp.faults_crc = s_faults_crc;
     rsp.flags = s_rsp_flags;
+    /* >>> RS_V3_DBG_START_ALL_LAG BEGIN */
+    if (s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT &&
+        s_event_crit.seq != 0u && g_rs_v3_dbg_sa.post_ms != 0u) {
+        const uint32_t now = HAL_GetTick();
+        g_rs_v3_dbg_sa.build_hits++;
+        if (g_rs_v3_dbg_sa.first_build_ms == 0u) {
+            g_rs_v3_dbg_sa.first_build_ms = now;
+            g_rs_v3_dbg_sa.first_build_seq = s_event_crit.seq;
+            g_rs_v3_dbg_sa.dt_post_to_build_ms = now - g_rs_v3_dbg_sa.post_ms;
+            rs_v3_dbg_sa_mark(2u);
+        }
+    }
+    /* >>> RS_V3_DBG_START_ALL_LAG END */
     return RsPanelV3_EncodeRsp(dst, dst_size, &rsp);
 }
 
@@ -1524,11 +2500,222 @@ void RsPanelV3Slave_OnButtonSample(void)
 {
     ButtonState st_all = Button_GetState(BUT_FORCE);
     ButtonState st_stop = Button_GetState(BUT_STOP);
+    ButtonState st_fire = Button_GetState(BUT_FIRE);
     uint8_t all_down = (st_all == ButtonStatePress || st_all == ButtonStateLongPress) ? 1u : 0u;
     uint8_t stop_down = (st_stop == ButtonStatePress || st_stop == ButtonStateLongPress) ? 1u : 0u;
+    /* Только антидребезг Button stack (SHORT_PRESS), без сырого GPIO. */
+    uint8_t fire_down = (st_fire == ButtonStatePress || st_fire == ButtonStateLongPress) ? 1u : 0u;
+    uint8_t is_small = PANEL_TYPE_IS_SMALL(PanelCfg_Get()->panel_type) ? 1u : 0u;
     uint32_t now = HAL_GetTick();
 
-    /* ПУСК ОБЩИЙ hold — локально. */
+    rs_v3_evt_inflight_watchdog();
+
+    /* ——— ОСТАНОВ: EVT только из DrainPanelState (SampleButtons PRESS).
+     * Здесь — long-press RESET; fallback press если Drain не сработал в тике. */
+    if (stop_down != 0u) {
+        if (s_btn_stop_evt_down == 0u) {
+            s_stop_press_ms = 0u;
+            s_hold_reset = 0u;
+            s_hold_reset_ms = 0u;
+            s_hold_reset_committed = 0u;
+            if (s_drain_posted_stop == 0u) {
+                rs_v3_post_stop_launch();
+            }
+        } else if (s_stop_press_ms < 0xFFF0u) {
+            s_stop_press_ms = (uint16_t)(s_stop_press_ms + 10u);
+        }
+        if (s_fire_active != 0u || s_hold_reset != 0u) {
+            if (s_hold_reset == 0u) {
+                s_hold_reset = 1u;
+                s_hold_reset_ms = 0u;
+                s_hold_reset_committed = 0u;
+            } else if (s_hold_reset_ms < RS_V3_HOLD_FIRE_RESET_MS) {
+                s_hold_reset_ms = (uint16_t)(s_hold_reset_ms + 10u);
+            }
+            if (s_hold_reset_ms >= RS_V3_HOLD_FIRE_RESET_MS &&
+                s_hold_reset_committed == 0u) {
+                s_hold_reset_committed = 1u;
+                s_fire_reset_evt_zone = s_selected_zone;
+                rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_FIRE_RESET,
+                                       s_fire_reset_evt_zone);
+                s_fire_reset_evt_pending = 0u;
+            }
+        }
+    } else if (s_btn_stop_evt_down != 0u) {
+        s_hold_reset = 0u;
+        s_hold_reset_ms = 0u;
+        s_hold_reset_committed = 0u;
+        s_stop_press_ms = 0u;
+    }
+    s_btn_stop_evt_down = stop_down;
+
+    /* ——— ПУСК СП ———
+     * EVT на RELEASE при hold_ms < RS_V3_SP_ARM_MS (debounce уже в Button stack).
+     * Малая: ≥2с → UI-таймер 3с → START_ALL_COMMIT (без START_SP на этом отпускании).
+     * Большая: ≥2с → без EVT. Confirm-retry ниже (как START_ALL), и после отпускания. */
+    if (is_small != 0u) {
+        if (fire_down != 0u) {
+            if (s_hold_start_sp == 0u) {
+                s_hold_start_sp = 1u;
+                s_hold_start_sp_ms = 0u;
+                s_hold_start_sp_cd = 0u;
+                s_hold_start_sp_cd_ms = 0u;
+                s_hold_start_sp_committed = 0u;
+            } else if (s_hold_start_sp_ms < 0xFFF0u) {
+                s_hold_start_sp_ms = (uint16_t)(s_hold_start_sp_ms + 10u);
+            }
+            if (s_hold_start_sp_ms >= RS_V3_SP_ARM_MS && s_hold_start_sp_cd == 0u &&
+                s_hold_start_sp_committed == 0u) {
+                s_hold_start_sp_cd = 1u;
+                s_hold_start_sp_cd_ms = 0u;
+                Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
+                                       SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
+                                       1u, SOUND_START_ALL_HOLD_PERIOD_MS);
+            }
+            if (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) {
+                if (s_hold_start_sp_cd_ms < RS_V3_SP_COUNTDOWN_MS) {
+                    s_hold_start_sp_cd_ms = (uint16_t)(s_hold_start_sp_cd_ms + 10u);
+                }
+                if (s_hold_start_sp_cd_ms >= RS_V3_SP_COUNTDOWN_MS) {
+                    s_hold_start_sp_committed = 1u;
+                    Beeper_StopPattern();
+                    rs_v3_restore_fault_beep_if_needed();
+                    rs_v3_post_start_all_commit();
+                }
+            }
+        } else if (s_hold_start_sp != 0u) {
+            const uint8_t was_cd = s_hold_start_sp_cd;
+            const uint8_t was_commit = s_hold_start_sp_committed;
+            const uint16_t hold_ms = s_hold_start_sp_ms;
+            s_hold_start_sp = 0u;
+            s_hold_start_sp_ms = 0u;
+            s_hold_start_sp_cd = 0u;
+            s_hold_start_sp_cd_ms = 0u;
+            s_hold_start_sp_committed = 0u;
+            if (was_cd != 0u && was_commit == 0u) {
+                Beeper_StopPattern();
+                rs_v3_restore_fault_beep_if_needed();
+            }
+            /* Короткий отпуск → START_SP; после arm/countdown — без SP. */
+            if (was_cd == 0u && was_commit == 0u && hold_ms < RS_V3_SP_ARM_MS) {
+                rs_v3_post_start_sp();
+            }
+        }
+    } else {
+        /* Большая: короткий RELEASE → START_SP; hold ≥2с → без EVT. */
+        if (fire_down != 0u) {
+            if (s_btn_start_sp_down == 0u) {
+                s_hold_start_sp_ms = 0u;
+            } else if (s_hold_start_sp_ms < 0xFFF0u) {
+                s_hold_start_sp_ms = (uint16_t)(s_hold_start_sp_ms + 10u);
+            }
+        } else if (s_btn_start_sp_down != 0u) {
+            if (s_hold_start_sp_ms < RS_V3_SP_ARM_MS) {
+                rs_v3_post_start_sp();
+            }
+            s_hold_start_sp_ms = 0u;
+        }
+    }
+    /* ПУСК СП confirm-retry:
+     * До ACK: НЕ force new seq каждые 200 мс — BuildRsp уже повторяет тот же
+     * s_event_crit. Новый seq срывает ACK (хост ACKит старый, панель уже на новом).
+     * Новый seq до ACK — только inflight watchdog (1.5 с).
+     * После ACK: новый seq только если still_need (FIRE1/countdown). */
+    if (s_start_sp_confirm_until_ms != 0u) {
+        if ((int32_t)(now - s_start_sp_confirm_until_ms) >= 0) {
+            s_start_sp_confirm_until_ms = 0u;
+            s_start_sp_confirm_retry_ms = 0u;
+            s_start_sp_ack_done = 0u;
+        } else if (s_start_sp_ack_done != 0u &&
+                   rs_v3_start_sp_should_retry() == 0u) {
+            s_start_sp_confirm_until_ms = 0u;
+            s_start_sp_confirm_retry_ms = 0u;
+        } else if (s_start_sp_ack_done == 0u) {
+            /* До ACK: critical слот пуст — восстановить EVT. */
+            if (s_stop_confirm_until_ms != 0u) {
+                rs_v3_cancel_stop_confirm();
+            }
+            if (s_event_crit.seq == 0u ||
+                s_event_crit.type != (uint8_t)RS_PANEL_V3_EVT_START_SP) {
+                if (s_start_sp_confirm_retry_ms < 0xFFF0u) {
+                    s_start_sp_confirm_retry_ms =
+                        (uint16_t)(s_start_sp_confirm_retry_ms + 10u);
+                }
+                if (s_start_sp_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
+                    s_start_sp_confirm_retry_ms = 0u;
+                    rs_v3_post_start_sp_raw();
+                }
+            } else {
+                s_start_sp_confirm_retry_ms = 0u;
+            }
+        } else if (rs_v3_start_sp_should_retry() != 0u) {
+            if (s_stop_confirm_until_ms != 0u) {
+                rs_v3_cancel_stop_confirm();
+            }
+            if (s_start_sp_confirm_retry_ms < 0xFFF0u) {
+                s_start_sp_confirm_retry_ms =
+                    (uint16_t)(s_start_sp_confirm_retry_ms + 10u);
+            }
+            if (s_start_sp_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
+                s_start_sp_confirm_retry_ms = 0u;
+                rs_v3_post_start_sp_raw();
+            }
+        }
+    }
+    /* ПУСК ОБЩИЙ: до ACK — ретраи EVT; после ACK — ждём host-ZONES (сброс в apply_zones). */
+    if (s_start_all_confirm_until_ms != 0u) {
+        if ((int32_t)(now - s_start_all_confirm_until_ms) >= 0) {
+            s_start_all_confirm_until_ms = 0u;
+            s_start_all_confirm_retry_ms = 0u;
+            s_start_all_ack_done = 0u;
+        } else if (s_start_all_ack_done == 0u) {
+            if (s_start_all_confirm_retry_ms < 0xFFF0u) {
+                s_start_all_confirm_retry_ms =
+                    (uint16_t)(s_start_all_confirm_retry_ms + 10u);
+            }
+            if (s_start_all_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
+                s_start_all_confirm_retry_ms = 0u;
+                if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_ALL_COMMIT,
+                                             0u, 0u, 0u, 0u) == 0u) {
+                    s_start_all_evt_pending = 1u;
+                } else {
+                    s_start_all_evt_pending = 0u;
+                }
+            }
+        }
+    }
+    /* ОСТАНОВ: до ACK — sticky seq (BuildRsp повторяет); force new seq только
+     * если critical слот пуст / не STOP. После ACK — без авто-EVT (toggle). */
+    if (s_stop_confirm_until_ms != 0u) {
+        if ((int32_t)(now - s_stop_confirm_until_ms) >= 0) {
+            s_stop_confirm_until_ms = 0u;
+            s_stop_confirm_retry_ms = 0u;
+            s_stop_ack_done = 0u;
+        } else if (s_stop_ack_done != 0u &&
+                   s_zones_valid != 0u &&
+                   rs_v3_zones_stop_goal_met(&s_zones) != 0u) {
+            s_stop_confirm_until_ms = 0u;
+            s_stop_confirm_retry_ms = 0u;
+        } else if (s_stop_ack_done == 0u) {
+            if (s_event_crit.seq != 0u &&
+                s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH) {
+                s_stop_confirm_retry_ms = 0u;
+            } else {
+                if (s_stop_confirm_retry_ms < 0xFFF0u) {
+                    s_stop_confirm_retry_ms =
+                        (uint16_t)(s_stop_confirm_retry_ms + 10u);
+                }
+                if (s_stop_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
+                    s_stop_confirm_retry_ms = 0u;
+                    rs_v3_post_stop_launch_raw();
+                }
+            }
+        }
+    }
+    s_btn_start_sp_down = fire_down;
+    s_drain_posted_stop = 0u;
+
+    /* ——— ПУСК ОБЩИЙ hold 3с (большая; на малой FORCE может promote) ——— */
     if (all_down != 0u) {
         if (s_hold_start_all == 0u) {
             s_hold_start_all = 1u;
@@ -1543,9 +2730,6 @@ void RsPanelV3Slave_OnButtonSample(void)
             Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
                                    SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
                                    1u, SOUND_START_ALL_HOLD_PERIOD_MS);
-            /* Не ставить main=1 здесь: иначе FrontendApplication решит, что
-             * уже на главном, и не сделает GotoScreen — таймер 3с не виден.
-             * Переход: Fire_IsStartAllHoldActive() в handleTickEvent. */
         } else if (s_hold_start_all_ms < RS_V3_HOLD_START_ALL_MS) {
             s_hold_start_all_ms = (uint16_t)(s_hold_start_all_ms + 10u);
         }
@@ -1555,12 +2739,7 @@ void RsPanelV3Slave_OnButtonSample(void)
             Beeper_StopPattern();
             rs_v3_restore_fault_beep_if_needed();
             rs_v3_restore_start_all_idle_leds();
-            /* EVT обязателен: пока слот занят — pending + retry каждый 10 мс. */
-            if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_ALL_COMMIT, 0u, 0u, 0u, 0u) == 0u) {
-                s_start_all_evt_pending = 1u;
-            } else {
-                s_start_all_evt_pending = 0u;
-            }
+            rs_v3_post_start_all_commit();
         }
         if ((now - s_blink_last_ms) >= RS_V3_BLINK_HALF_MS &&
             s_hold_start_all_committed == 0u) {
@@ -1578,31 +2757,6 @@ void RsPanelV3Slave_OnButtonSample(void)
         }
         s_hold_start_all_committed = 0u;
         rs_v3_restore_start_all_idle_leds();
-    }
-
-    /* ОСТАНОВ hold ≥5 с → FIRE_RESET. */
-    if (stop_down != 0u && (s_fire_active != 0u || s_hold_reset != 0u)) {
-        if (s_hold_reset == 0u) {
-            s_hold_reset = 1u;
-            s_hold_reset_ms = 0u;
-            s_hold_reset_committed = 0u;
-        } else if (s_hold_reset_ms < RS_V3_HOLD_FIRE_RESET_MS) {
-            s_hold_reset_ms = (uint16_t)(s_hold_reset_ms + 10u);
-        }
-        if (s_hold_reset_ms >= RS_V3_HOLD_FIRE_RESET_MS &&
-            s_hold_reset_committed == 0u) {
-            s_hold_reset_committed = 1u;
-            if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_FIRE_RESET, 0u, 0u, 0u, 0u) == 0u) {
-                s_fire_reset_evt_pending = 1u;
-            } else {
-                s_fire_reset_evt_pending = 0u;
-            }
-        }
-    } else if (s_hold_reset != 0u) {
-        s_hold_reset = 0u;
-        s_hold_reset_ms = 0u;
-        s_hold_reset_committed = 0u;
-        /* pending FIRE_RESET не сбрасываем — дошлём после отпускания. */
     }
 
     rs_v3_evt_retry_sticky();
@@ -1680,47 +2834,23 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
         }
     }
 
+    /* ОСТАНОВ: PRESS → force new seq. START_SP — только RELEASE в OnButtonSample. */
     for (i = 0u; i < ctx->pending_btn_count && i < RS_PANEL_MAX_POLL_BTN_EVENTS; i++) {
         const RsPanelButtonEvent *be = &ctx->pending_btn[i];
         if (be->state != (uint8_t)RS_PANEL_BUTTON_PRESS) {
             continue;
         }
-        if (be->type == (uint8_t)RS_PANEL_BTN_START_SP) {
-            (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_SP, s_selected_zone, 0u, 0u, 0u);
-        } else if (be->type == (uint8_t)RS_PANEL_BTN_STOP) {
-            const uint8_t posted =
-                RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_STOP_LAUNCH, s_selected_zone, 0u, 0u, 0u);
-            /* Optimistic UI только если EVT ушёл/в очереди — иначе рассинхрон с хостом. */
-            if (posted != 0u && s_zones_valid != 0u && s_zones.count > 0u) {
-                uint8_t zi;
-                uint8_t changed = 0u;
-                for (zi = 0u; zi < s_zones.count && zi < RS_PANEL_V3_MAX_ZONES; zi++) {
-                    RsPanelV3ZoneItem *it = &s_zones.items[zi];
-                    if (s_selected_zone != 0u && it->zone != s_selected_zone) {
-                        continue;
-                    }
-                    if (it->status == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) {
-                        it->status = (uint8_t)RS_PANEL_V3_ZONE_PAUSED;
-                        changed = 1u;
-                    } else if (it->status == (uint8_t)RS_PANEL_V3_ZONE_PAUSED) {
-                        it->status = (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN;
-                        changed = 1u;
-                    }
-                }
-                if (changed != 0u) {
-                    rs_v3_apply_zones(&s_zones);
-                }
-            }
+        if (be->type == (uint8_t)RS_PANEL_BTN_STOP) {
+            rs_v3_post_stop_launch();
+            s_drain_posted_stop = 1u;
         }
     }
-
     ctx->pending_ui_count = 0u;
     ctx->pending_btn_count = 0u;
 
-    /* Журнал не занимает слот, пока ждут большие кнопки. */
-    if (s_evt_q_n == 0u && s_start_all_evt_pending == 0u &&
-        s_fire_reset_evt_pending == 0u &&
-        (s_event.seq == 0u || rs_v3_evt_is_fire_ctrl(s_event.type) == 0u)) {
+    /* Prefetch журнала — только ordinary idle; critical может быть занят. */
+    if (s_fire_active == 0u &&
+        s_event.seq == 0u && s_evt_q_n == 0u) {
         PanelJournalCache_PrefetchProcess();
     }
 }
@@ -1758,9 +2888,12 @@ static void rs_v3_sync_status_leds(void)
 {
     uint8_t fire = s_fire_active;
     uint8_t link_lost = PanelLinkMonitor_IsLost();
-    /* LED_ERR только по реальному списку / link lost — не по SYS_HAS_FAULTS
-     * без FAULT_SET (иначе лампа горит, а на экране ещё «НОРМА»). */
-    uint8_t faults = (s_active_fault_count > 0u || link_lost != 0u) ? 1u : 0u;
+    /* LED_ERR/NORM: список, link lost, CLEAR_ALL→SET (resync), либо HAS_FAULTS
+     * при уже показанном UI. Не гасить NORM на миг между CLEAR и SET. */
+    uint8_t faults =
+        (s_active_fault_count > 0u || link_lost != 0u ||
+         s_fault_sound_resync != 0u ||
+         (s_has_faults != 0u && s_fault_ui_pushed_count > 0u)) ? 1u : 0u;
 
     rs_v3_sync_power_led();
 
@@ -1812,11 +2945,11 @@ void RsPanelV3Slave_RequestFaultUiRefresh(void)
 void RsPanelV3Slave_Timer10ms(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t i;
 
     RsPanelV3Slave_OnButtonSample();
     rs_v3_evt_retry_sticky();
     rs_v3_evt_flush_queue();
+    rs_v3_evt_flush_crit();
     rs_v3_sync_status_leds();
     /* Запись каталога во Flash после quiet (не на каждый POLL). */
     if (s_catalog_flash_dirty != 0u &&
@@ -1825,10 +2958,9 @@ void RsPanelV3Slave_Timer10ms(void)
         s_rsp_flags &= (uint8_t)(~RS_PANEL_V3_RSP_FLAG_NEED_CATALOG);
         rs_v3_catalog_flash_save_if_dirty();
     }
-    /* Журнал не трогает слот, пока ждут большие кнопки. */
-    if (s_evt_q_n == 0u && s_start_all_evt_pending == 0u &&
-        s_fire_reset_evt_pending == 0u &&
-        (s_event.seq == 0u || rs_v3_evt_is_fire_ctrl(s_event.type) == 0u)) {
+    /* Prefetch журнала — только ordinary idle; critical может быть занят. */
+    if (s_fire_active == 0u &&
+        s_event.seq == 0u && s_evt_q_n == 0u) {
         PanelJournalCache_PrefetchProcess();
     }
 
@@ -1843,7 +2975,10 @@ void RsPanelV3Slave_Timer10ms(void)
      * иначе UI потом отвергает 4→3 как «glitch» / остаётся старый список. */
     if (s_sys_ready != 0u && s_fault_ui_dirty != 0u &&
         (now - s_fault_ui_dirty_ms) >= RS_V3_FAULT_UI_QUIET_MS) {
-        if (s_active_fault_count > 0u || s_has_faults == 0u) {
+        /* Не пушить «НОРМА» (n=0), пока HAS_FAULTS или идёт CLEAR→SET —
+         * иначе миг центрального НОРМА при уходе одной из нескольких. */
+        if (s_active_fault_count > 0u ||
+            (s_has_faults == 0u && s_fault_sound_resync == 0u)) {
             const uint8_t was_resync = s_fault_sound_resync;
             s_fault_sound_resync = 0u;
             s_fault_resync_wait_ms = 0u;
@@ -1859,6 +2994,11 @@ void RsPanelV3Slave_Timer10ms(void)
             }
             if ((now - s_fault_resync_wait_ms) < 3000u) {
                 s_fault_ui_dirty_ms = now;
+            } else if (s_has_faults != 0u) {
+                /* SET так и не пришёл, но хост ещё сообщает о неисправностях —
+                 * не мигать «НОРМА»; ждём дальше (CRC догонит). */
+                s_fault_ui_dirty_ms = now;
+                s_fault_resync_wait_ms = now;
             } else {
                 s_fault_sound_resync = 0u;
                 s_fault_resync_wait_ms = 0u;
@@ -1871,20 +3011,4 @@ void RsPanelV3Slave_Timer10ms(void)
         }
     }
 
-    /* Локальный тик таймеров зон раз в 1 с. */
-    if (s_local_timer_tick_ms == 0u) {
-        s_local_timer_tick_ms = now;
-    }
-    if ((now - s_local_timer_tick_ms) >= 1000u) {
-        s_local_timer_tick_ms += 1000u;
-        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
-            if ((s_zones.items[i].status == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) &&
-                s_local_timer_s[i] > 0u) {
-                s_local_timer_s[i]--;
-            }
-        }
-        if (s_zones_valid != 0u && s_zones.count > 0u) {
-            rs_v3_apply_zones(&s_zones);
-        }
-    }
 }
