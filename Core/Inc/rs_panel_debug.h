@@ -78,6 +78,10 @@ typedef struct {
     volatile uint16_t rx_last_len;
     /* Сколько IDLE-событий содержали 0xA5 (0 при шуме без преамбулы). */
     volatile uint32_t rx_a5_seen;
+    /* Последний RSP_POLL: plen payload + полный wire_len (pad+frame+trail). */
+    volatile uint16_t last_poll_rsp_plen;
+    volatile uint16_t last_poll_rsp_wire_len;
+    volatile uint8_t  last_poll_rsp_head[16];
 } RsPanelRsDebug;
 
 extern volatile RsPanelRsDebug g_rs_panel_dbg;
@@ -89,6 +93,8 @@ void RsPanelDebug_OnHostFrame(uint8_t cmd, uint8_t seq, uint8_t addr);
 void RsPanelDebug_OnHostFrameIgnored(void);
 void RsPanelDebug_OnTxFrame(uint8_t cmd, uint8_t ok);
 void RsPanelDebug_OnPollRsp(uint8_t ui_evt_count, uint8_t btn_evt_count);
+void RsPanelDebug_OnPollRspWire(uint16_t payload_len, uint16_t wire_len,
+                                const uint8_t *frame_head, uint16_t head_len);
 void RsPanelDebug_OnUiEventQueued(uint8_t evt_type, uint16_t p1);
 
 void RsPanelDebug_OnRxRearm(void);

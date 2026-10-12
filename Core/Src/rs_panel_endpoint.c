@@ -548,20 +548,58 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
 
     switch (frame->cmd) {
     case RS_PANEL_CMD_CAPS_REQ:
+        /* Как ACTIVITY: только unicast — иначе 2 панели dual-TX на half-duplex. */
+        if (frame->addr != endpoint->panel_addr) {
+            break;
+        }
         rs_send_caps(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++);
         break;
     case RS_PANEL_CMD_POLL:
         {
+            if (frame->addr != endpoint->panel_addr) {
+                break; /* broadcast POLL → dual-TX; только свой addr */
+            }
             if (frame->payload_len == 0u || frame->payload == 0 ||
                 frame->payload[0] != RS_PANEL_V3_VERSION) {
                 break; /* только v3 POLL */
             }
             /* UART RX IDLE IRQ: короткий RSP сразу, ACK полос сразу,
-             * ZONES/TIME/RTC — в Timer10ms / ProcessDeferredUi. */
+             * ZONES/TIME/RTC — в Timer10ms / ProcessDeferredUi.
+             * Разнос по addr: если из‑за шума/ложного CRC обе панели всё же
+             * ответят — RSP не наложатся (addr×200 мкс ≫ длительность кадра). */
+            {
+                volatile uint32_t spin =
+                    (SystemCoreClock / 1000000u) *
+                    (uint32_t)endpoint->panel_addr * 200u / 4u;
+                while (spin > 0u) {
+                    spin--;
+                }
+            }
             uint8_t payload[96];
-            uint16_t plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+            uint16_t plen;
+            /* SYS-only POLL (скан addr): полный BuildRsp=24 → wire~41, при 2
+             * панелях мастер Live видит только ~9 байт. Минимальный RSP
+             * (ver) → orphan need=9 — как раз то, что доезжает. */
+            if (frame->payload_len <= 5u) {
+                payload[0] = RS_PANEL_V3_VERSION;
+                plen = 1u;
+            } else {
+                plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+            }
             if (plen > 0u) {
+                /* wire = 4×FF + A5 5A len…CRC + 4×FF; frame = 9+plen */
+                uint16_t frame_len = (uint16_t)(9u + plen);
+                uint16_t wire_len = (uint16_t)(frame_len + 8u);
+                uint8_t head[16];
+                head[0] = 0xA5u;
+                head[1] = 0x5Au;
+                head[2] = (uint8_t)(4u + plen);
+                head[3] = endpoint->panel_addr;
+                head[4] = endpoint->next_tx_seq;
+                head[5] = RS_BUS_FLAG_DIR;
+                head[6] = RS_PANEL_RSP_POLL;
                 RsPanelDebug_OnPollRsp(0u, 0u);
+                RsPanelDebug_OnPollRspWire(plen, wire_len, head, 7u);
                 rs_bus_send_frame(endpoint, endpoint->panel_addr,
                                   endpoint->next_tx_seq++,
                                   RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
@@ -585,11 +623,17 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
         }
         break;
     case RS_PANEL_CMD_PANEL_RESET:
+        if (frame->addr != endpoint->panel_addr) {
+            break;
+        }
         PanelState_ResetUi(&endpoint->state);
         PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_LOGO, RS_PANEL_UI_ACTION_REPLACE);
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         break;
     case RS_PANEL_CMD_ENTER_BOOTLOADER:
+        if (frame->addr != endpoint->panel_addr) {
+            break;
+        }
         /* ACK из RX IRQ; reset — из PanelUpd_Timer10ms (не Delay/Reset в callback UART). */
         rs_send_ack(endpoint, endpoint->panel_addr, endpoint->next_tx_seq++, frame->seq);
         PanelUpd_RequestEnterBootloader(endpoint->panel_addr);

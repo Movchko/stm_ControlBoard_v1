@@ -113,6 +113,22 @@ void RsPanelDebug_OnPollRsp(uint8_t ui_evt_count, uint8_t btn_evt_count)
     g_rs_panel_dbg.pending_btn_count = btn_evt_count;
 }
 
+void RsPanelDebug_OnPollRspWire(uint16_t payload_len, uint16_t wire_len,
+                                const uint8_t *frame_head, uint16_t head_len)
+{
+    uint16_t i;
+
+    g_rs_panel_dbg.last_poll_rsp_plen = payload_len;
+    g_rs_panel_dbg.last_poll_rsp_wire_len = wire_len;
+    if (frame_head == 0) {
+        return;
+    }
+    for (i = 0u; i < (uint16_t)sizeof(g_rs_panel_dbg.last_poll_rsp_head); i++) {
+        g_rs_panel_dbg.last_poll_rsp_head[i] =
+            (i < head_len) ? frame_head[i] : 0u;
+    }
+}
+
 void RsPanelDebug_OnUiEventQueued(uint8_t evt_type, uint16_t p1)
 {
     g_rs_panel_dbg.last_ui_evt_type = evt_type;

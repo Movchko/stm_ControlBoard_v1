@@ -25,8 +25,12 @@ static void rs_bus_wait_tx_complete(UART_HandleTypeDef *uart)
     }
 }
 
-/* Панель Live: кадры «5A 09…» без A5. 100 мкс DE + dummy 0xFF перед кадром. */
-#define RS_BUS_DE_LEAD_US 100u
+/* Панель Live: кадры «5A 09…» без A5. При 2+ на шине 100 мкс мало (ringing). */
+#define RS_BUS_DE_LEAD_US 300u
+/* @2 Мбод IDLE≈5 мкс: IRQ во время Transmit → щель → мастер short_hold на сироте-5A. */
+/* Leading FF: фронт DE / sync. Trailing FF: CRC не на срезе DE↓ (Live: need-1). */
+#define RS_BUS_TX_PAD_N    4u
+#define RS_BUS_TX_TRAIL_N  4u
 
 static void rs_bus_delay_us(uint32_t us)
 {
@@ -37,11 +41,10 @@ static void rs_bus_delay_us(uint32_t us)
     }
 }
 
-static HAL_StatusTypeDef rs_bus_tx_preamble_pad(UART_HandleTypeDef *uart)
-{
-    uint8_t pad = 0xFFu;
-    return HAL_UART_Transmit(uart, &pad, 1u, 5u);
-}
+/*
+ * Pad 0xFF + кадр одним Transmit. Два HAL_UART_Transmit давали IDLE между FF и A5:
+ * мастер rearm mid-frame → src_size < total_size, 2 панели не ADD.
+ */
 
 /* TX из main (DISCOVER RSP в Timer10ms) не должен перебиваться TX из UART4 IRQ. */
 static void rs_bus_rx_irq_lock(UART_HandleTypeDef *uart)
@@ -278,9 +281,9 @@ void RsBus_ProcessRxBytes(RsBusContext *ctx, const uint8_t *data, uint16_t len)
     }
 
     {
-        /* Недособранный хвост старше 2 мс — не продолжение кадра (2 Мбод: кадр < 1.5 мс). */
+        /* Хвост после раннего IDLE: 2 мс мало (Tick 1 мс + rearm). */
         uint32_t now = HAL_GetTick();
-        if (ctx->rx_len != 0u && (now - ctx->rx_last_ms) > 2u) {
+        if (ctx->rx_len != 0u && (now - ctx->rx_last_ms) > 30u) {
             ctx->rx_len = 0u;
         }
         ctx->rx_last_ms = now;
@@ -297,9 +300,19 @@ void RsBus_ProcessRxBytes(RsBusContext *ctx, const uint8_t *data, uint16_t len)
             uint16_t avail = (uint16_t)(ctx->rx_len - pos);
             uint8_t tmp[RS_BUS_MAX_FRAME_SIZE];
             uint16_t need;
+            uint16_t len_field;
+            uint16_t total_size;
 
             if (avail < 8u) {
                 break;
+            }
+            /* Неполный сирота-5A: ждать хвост, не сдвигать pos. */
+            len_field = ctx->rx_buf[(uint16_t)(pos + 1u)];
+            if (len_field >= 4u) {
+                total_size = (uint16_t)(2u + 1u + len_field + 2u);
+                if (avail < (uint16_t)(total_size - 1u)) {
+                    break;
+                }
             }
             need = (uint16_t)(1u + avail); /* синтетический A5 + хвост от 5A */
             if (need > (uint16_t)sizeof(tmp)) {
@@ -367,35 +380,42 @@ HAL_StatusTypeDef RsBus_SendFrame(RsBusContext *ctx,
                                   const uint8_t *payload,
                                   uint16_t payload_len)
 {
-    uint8_t frame[RS_BUS_MAX_FRAME_SIZE];
+    uint8_t wire[RS_BUS_MAX_FRAME_SIZE + RS_BUS_TX_PAD_N + RS_BUS_TX_TRAIL_N];
     uint16_t frame_len;
+    uint16_t wire_len;
+    uint32_t primask;
+    HAL_StatusTypeDef st;
 
     if (ctx == 0 || ctx->uart == 0) {
         return HAL_ERROR;
     }
 
-    frame_len = RsBus_FrameEncode(frame, sizeof(frame), addr, seq, flags, cmd, payload, payload_len);
+    memset(wire, 0xFFu, RS_BUS_TX_PAD_N);
+    frame_len = RsBus_FrameEncode(&wire[RS_BUS_TX_PAD_N], RS_BUS_MAX_FRAME_SIZE,
+                                  addr, seq, flags, cmd, payload, payload_len);
     if (frame_len == 0u) {
         return HAL_ERROR;
     }
+    memset(&wire[RS_BUS_TX_PAD_N + frame_len], 0xFFu, RS_BUS_TX_TRAIL_N);
+    wire_len = (uint16_t)(frame_len + RS_BUS_TX_PAD_N + RS_BUS_TX_TRAIL_N);
 
     rs_bus_rx_irq_lock(ctx->uart);
     (void)HAL_UART_AbortReceive(ctx->uart);
     rs_bus_de_set(ctx, GPIO_PIN_SET);
     rs_bus_delay_us(RS_BUS_DE_LEAD_US);
-    if (rs_bus_tx_preamble_pad(ctx->uart) != HAL_OK ||
-        HAL_UART_Transmit(ctx->uart, frame, frame_len, 20u) != HAL_OK) {
-        rs_bus_wait_tx_complete(ctx->uart);
-        rs_bus_de_set(ctx, GPIO_PIN_RESET);
-        rs_bus_delay_us(RS_BUS_DE_LEAD_US);
-        rs_bus_rx_arm(ctx);
-        rs_bus_rx_irq_unlock(ctx->uart);
-        return HAL_ERROR;
+    /* TouchGFX/SysTick иначе вставляют щель >1 симв → IDLE на мастере mid-RSP. */
+    primask = __get_PRIMASK();
+    __disable_irq();
+    st = HAL_UART_Transmit(ctx->uart, wire, wire_len, 20u);
+    if (primask == 0u) {
+        __enable_irq();
     }
     rs_bus_wait_tx_complete(ctx->uart);
+    /* Trailing FF уже после CRC; короткий hold на всякий случай. */
+    rs_bus_delay_us(50u);
     rs_bus_de_set(ctx, GPIO_PIN_RESET);
     rs_bus_delay_us(RS_BUS_DE_LEAD_US);
     rs_bus_rx_arm(ctx);
     rs_bus_rx_irq_unlock(ctx->uart);
-    return HAL_OK;
+    return st;
 }
