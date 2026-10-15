@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "Display/display.h"
 #include "panel_app.h"
+#include "rs_panel_endpoint.h"
 #include "beeper.h"
 /* USER CODE END Includes */
 
@@ -184,6 +185,9 @@ int main(void)
 		  LED_TOGGLE;
 		  //Beeper_LongBeep1300ms();
 	  }
+
+	  /* RSP_POLL вне UART IRQ — каждый оборот main, не ждать 10 мс. */
+	  RsPanelEndpoint_FlushPendingTx();
 
 	  if ((cur_tick - app_tick) >= 10u) {
 		  app_tick = cur_tick;
@@ -838,7 +842,7 @@ static void MX_UART4_Init(void)
 
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
-  huart4.Init.BaudRate = 2000000;
+  huart4.Init.BaudRate = 250000;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;

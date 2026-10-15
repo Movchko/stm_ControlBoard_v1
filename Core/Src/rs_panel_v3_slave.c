@@ -928,6 +928,30 @@ static void rs_v3_restore_fault_beep_if_needed(void)
     rs_v3_fault_beep(rs_v3_has_attention_faults(), 0u);
 }
 
+/* Отмена hold ПУСК до commit: вернуть звук пожара или дежурный fault.
+ * Beeper_StopPattern глушит шину, а s_fire_snd_phase остаётся прежним —
+ * sync_fire думает «уже играет» и не перезапускает. */
+static void rs_v3_restore_beep_after_hold_cancel(void)
+{
+    Beeper_StopPattern();
+    if (s_fire_active != 0u) {
+        s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
+        s_fire_snd_alert_fire1 = 0u;
+        rs_v3_sync_fire_indication();
+        return;
+    }
+    rs_v3_restore_fault_beep_if_needed();
+}
+
+/* Hold-писк в такт миганию (800/800). У Beeper repeat_ms — пауза ПОСЛЕ
+ * пакета on+off; PERIOD сюда давать нельзя (получится 1 писк за 3.2 с). */
+static void rs_v3_start_hold_beep(void)
+{
+    Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
+                           SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
+                           1u, 10u);
+}
+
 /*
  * После CLEAR_ALL→SET: SIGNAL только при реальном росте count (как на ППКУ).
  * Укорочение/тот же n — не рестартовать DUTY (иначе период «прыгает»).
@@ -2568,9 +2592,7 @@ void RsPanelV3Slave_OnButtonSample(void)
                 s_hold_start_sp_committed == 0u) {
                 s_hold_start_sp_cd = 1u;
                 s_hold_start_sp_cd_ms = 0u;
-                Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
-                                       SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
-                                       1u, SOUND_START_ALL_HOLD_PERIOD_MS);
+                rs_v3_start_hold_beep();
             }
             if (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) {
                 if (s_hold_start_sp_cd_ms < RS_V3_SP_COUNTDOWN_MS) {
@@ -2593,8 +2615,7 @@ void RsPanelV3Slave_OnButtonSample(void)
             s_hold_start_sp_cd_ms = 0u;
             s_hold_start_sp_committed = 0u;
             if (was_cd != 0u && was_commit == 0u) {
-                Beeper_StopPattern();
-                rs_v3_restore_fault_beep_if_needed();
+                rs_v3_restore_beep_after_hold_cancel();
             }
             /* Короткий отпуск → START_SP; после arm/countdown — без SP. */
             if (was_cd == 0u && was_commit == 0u && hold_ms < RS_V3_SP_ARM_MS) {
@@ -2727,9 +2748,7 @@ void RsPanelV3Slave_OnButtonSample(void)
             Led_SetBrightness(LED_STR_START_ALL, LED_BUT_MAX_BRIGHTNESS);
             Led_Set(LED_BUT_START_ALL, 1u);
             Led_Set(LED_STR_START_ALL, 1u);
-            Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
-                                   SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
-                                   1u, SOUND_START_ALL_HOLD_PERIOD_MS);
+            rs_v3_start_hold_beep();
         } else if (s_hold_start_all_ms < RS_V3_HOLD_START_ALL_MS) {
             s_hold_start_all_ms = (uint16_t)(s_hold_start_all_ms + 10u);
         }
@@ -2752,8 +2771,7 @@ void RsPanelV3Slave_OnButtonSample(void)
         s_hold_start_all = 0u;
         s_hold_start_all_ms = 0u;
         if (s_hold_start_all_committed == 0u) {
-            Beeper_StopPattern();
-            rs_v3_restore_fault_beep_if_needed();
+            rs_v3_restore_beep_after_hold_cancel();
         }
         s_hold_start_all_committed = 0u;
         rs_v3_restore_start_all_idle_leds();

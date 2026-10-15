@@ -85,6 +85,12 @@ static uint16_t s_deferred_poll_q_len[RS_DEFER_POLL_Q];
 static volatile uint8_t s_defer_poll_head; /* pop */
 static volatile uint8_t s_defer_poll_tail; /* push */
 static volatile uint8_t s_defer_poll_n;
+/* RSP_POLL не из UART IRQ: @250 кбод TX~2…11 мс в IRQ глотает SysTick
+ * (один pending на весь интервал) → «ПУСК ОБЩИЙ» идёт медленно. */
+static uint8_t s_pending_poll_rsp[96];
+static volatile uint16_t s_pending_poll_rsp_len;
+static volatile uint8_t s_pending_poll_rsp_seq;
+static volatile uint8_t s_pending_poll_rsp_valid;
 typedef struct {
     uint16_t screen_id;
     uint8_t action;
@@ -92,6 +98,8 @@ typedef struct {
 
 static DeferredNavUi s_deferred_nav;
 static volatile uint8_t s_nav_pending;
+
+static void rs_poll_rsp_flush(RsPanelEndpoint *endpoint);
 
 static void rs_queue_nav(uint16_t screen_id, uint8_t action)
 {
@@ -257,8 +265,14 @@ static void rs_poll_body_drain(void)
     }
 }
 
+void RsPanelEndpoint_FlushPendingTx(void)
+{
+    rs_poll_rsp_flush(&g_endpoint);
+}
+
 void RsPanelEndpoint_ProcessDeferredUi(void)
 {
+    rs_poll_rsp_flush(&g_endpoint);
     rs_poll_body_drain();
     if (s_nav_pending != 0u) {
         s_nav_pending = 0u;
@@ -305,6 +319,56 @@ static void rs_bus_send_frame(RsPanelEndpoint *endpoint,
     }
     st = RsBus_SendFrame(&endpoint->bus, addr, seq, flags, cmd, payload, payload_len);
     RsPanelDebug_OnTxFrame(cmd, (st == HAL_OK) ? 1u : 0u);
+}
+
+static void rs_poll_rsp_flush(RsPanelEndpoint *endpoint)
+{
+    uint16_t plen;
+    uint8_t seq;
+    uint8_t payload[96];
+    uint32_t primask;
+
+    if (endpoint == 0 || s_pending_poll_rsp_valid == 0u) {
+        return;
+    }
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (s_pending_poll_rsp_valid == 0u) {
+        if (primask == 0u) {
+            __enable_irq();
+        }
+        return;
+    }
+    plen = s_pending_poll_rsp_len;
+    seq = s_pending_poll_rsp_seq;
+    if (plen > (uint16_t)sizeof(payload)) {
+        plen = (uint16_t)sizeof(payload);
+    }
+    if (plen > 0u) {
+        memcpy(payload, s_pending_poll_rsp, plen);
+    }
+    s_pending_poll_rsp_valid = 0u;
+    s_pending_poll_rsp_len = 0u;
+    if (primask == 0u) {
+        __enable_irq();
+    }
+    if (plen > 0u) {
+        uint16_t frame_len = (uint16_t)(9u + plen);
+        uint16_t wire_len = (uint16_t)(frame_len + 8u);
+        uint8_t head[16];
+        head[0] = 0xA5u;
+        head[1] = 0x5Au;
+        head[2] = (uint8_t)(4u + plen);
+        head[3] = endpoint->panel_addr;
+        head[4] = seq;
+        head[5] = RS_BUS_FLAG_DIR;
+        head[6] = RS_PANEL_RSP_POLL;
+        RsPanelDebug_OnPollRsp(0u, 0u);
+        RsPanelDebug_OnPollRspWire(plen, wire_len, head, 7u);
+        rs_bus_send_frame(endpoint, endpoint->panel_addr, seq,
+                          RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
+                          payload, plen);
+    }
 }
 
 static uint16_t rs_put_u16le(uint8_t *dst, uint16_t value)
@@ -563,50 +627,28 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
                 frame->payload[0] != RS_PANEL_V3_VERSION) {
                 break; /* только v3 POLL */
             }
-            /* UART RX IDLE IRQ: короткий RSP сразу, ACK полос сразу,
-             * ZONES/TIME/RTC — в Timer10ms / ProcessDeferredUi.
-             * Разнос по addr: если из‑за шума/ложного CRC обе панели всё же
-             * ответят — RSP не наложатся (addr×200 мкс ≫ длительность кадра). */
-            {
-                volatile uint32_t spin =
-                    (SystemCoreClock / 1000000u) *
-                    (uint32_t)endpoint->panel_addr * 200u / 4u;
-                while (spin > 0u) {
-                    spin--;
-                }
-            }
-            uint8_t payload[96];
-            uint16_t plen;
-            /* SYS-only POLL (скан addr): полный BuildRsp=24 → wire~41, при 2
-             * панелях мастер Live видит только ~9 байт. Минимальный RSP
-             * (ver) → orphan need=9 — как раз то, что доезжает. */
-            if (frame->payload_len <= 5u) {
-                payload[0] = RS_PANEL_V3_VERSION;
-                plen = 1u;
-            } else {
-                plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
-            }
-            if (plen > 0u) {
-                /* wire = 4×FF + A5 5A len…CRC + 4×FF; frame = 9+plen */
-                uint16_t frame_len = (uint16_t)(9u + plen);
-                uint16_t wire_len = (uint16_t)(frame_len + 8u);
-                uint8_t head[16];
-                head[0] = 0xA5u;
-                head[1] = 0x5Au;
-                head[2] = (uint8_t)(4u + plen);
-                head[3] = endpoint->panel_addr;
-                head[4] = endpoint->next_tx_seq;
-                head[5] = RS_BUS_FLAG_DIR;
-                head[6] = RS_PANEL_RSP_POLL;
-                RsPanelDebug_OnPollRsp(0u, 0u);
-                RsPanelDebug_OnPollRspWire(plen, wire_len, head, 7u);
-                rs_bus_send_frame(endpoint, endpoint->panel_addr,
-                                  endpoint->next_tx_seq++,
-                                  RS_BUS_FLAG_DIR, RS_PANEL_RSP_POLL,
-                                  payload, plen);
-            }
+            /* Сначала ACK+stream (FAULT_CLEAR/SET, каталог), затем BuildRsp:
+             * иначе faults_crc в RSP отстаёт на 1 POLL → мастер вечно
+             * FAULT_CLEAR при mismatch, UI/журнал не догоняют. TX — из main. */
             (void)RsPanelV3Slave_OnPollAcks(frame->payload, frame->payload_len);
             (void)RsPanelV3Slave_OnPollStream(frame->payload, frame->payload_len);
+            {
+                uint8_t payload[96];
+                uint16_t plen;
+                /* SYS-only POLL (скан): минимальный RSP (ver). */
+                if (frame->payload_len <= 5u) {
+                    payload[0] = RS_PANEL_V3_VERSION;
+                    plen = 1u;
+                } else {
+                    plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
+                }
+                if (plen > 0u && plen <= (uint16_t)sizeof(s_pending_poll_rsp)) {
+                    memcpy(s_pending_poll_rsp, payload, plen);
+                    s_pending_poll_rsp_len = plen;
+                    s_pending_poll_rsp_seq = endpoint->next_tx_seq++;
+                    s_pending_poll_rsp_valid = 1u;
+                }
+            }
             rs_poll_body_enqueue(frame->payload, frame->payload_len);
         }
         break;
@@ -688,6 +730,8 @@ void RsPanelEndpoint_Timer10ms(void)
 {
     /* FE/ORE без ErrorCallback оставляли RX мёртвым — сторож поднимает DMA. */
     RsBus_RxWatchdog(&g_endpoint.bus);
+    /* RSP сразу из thread-контекста — до тяжёлого UI/кнопок. */
+    rs_poll_rsp_flush(&g_endpoint);
     /* v3 POLL body (ZONES/TIME) — не в UART IRQ; UI fire/warn — отдельно ниже. */
     rs_poll_body_drain();
     /* UI применяем из TouchGFX tick (после перехода logo→MAIN), а не отсюда:
@@ -738,7 +782,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
         n = (uint16_t)sizeof(s_rx_shadow);
     }
     memcpy(s_rx_shadow, g_endpoint.bus.rx_dma_buf, n);
-    /* Сразу re-arm: разбор+ответ в IRQ дольше байта @2 Мбод. */
+    /* Сразу re-arm: разбор+ответ в IRQ дольше байта на линии. */
     RsBus_RxRearmFromIsr(&g_endpoint.bus);
     RsPanelDebug_OnRxDma(n);
     {

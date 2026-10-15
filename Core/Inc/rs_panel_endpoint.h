@@ -21,6 +21,8 @@ typedef struct {
 void RsPanelEndpoint_Init(void);
 void RsPanelEndpoint_Timer10ms(void);
 void RsPanelEndpoint_ProcessDeferredUi(void);
+/** TX отложенного RSP_POLL (вызывать из main/Timer — не из UART IRQ). */
+void RsPanelEndpoint_FlushPendingTx(void);
 /** Очередь WARN UI (из UART/OnPoll) → TouchGFX tick. */
 void RsPanelEndpoint_QueueWarningUi(uint8_t active,
                                     uint8_t n_items,

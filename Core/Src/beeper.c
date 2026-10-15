@@ -223,7 +223,7 @@ static void Beeper_Tim6Configure(void)
 static void Beeper_DacWrite(uint32_t level)
 {
 	//TODO DELETE  return;
-	return;
+	//return;
 
 	if (level > SOUND_DAC_LEVEL_MAX) {
 		level = SOUND_DAC_LEVEL_MAX;
@@ -738,7 +738,7 @@ void Beeper_ButtonAcknowledge(void)
 	if (Fire_IsStartAllHoldActive() == 0u &&
 	    g_resume_ctx.valid != 0u &&
 	    g_resume_ctx.state == BEEPER_STATE_PATTERN &&
-	    g_resume_ctx.repeat_ticks == Beeper_MsToTicks(SOUND_START_ALL_HOLD_PERIOD_MS) &&
+	    g_resume_ctx.on_ticks == Beeper_MsToTicks(SOUND_START_ALL_HOLD_DUTY_MS) &&
 	    g_resume_ctx.pulses_total == 1u) {
 		g_resume_ctx.valid = 0u;
 	}

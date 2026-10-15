@@ -25,10 +25,9 @@ static void rs_bus_wait_tx_complete(UART_HandleTypeDef *uart)
     }
 }
 
-/* Панель Live: кадры «5A 09…» без A5. При 2+ на шине 100 мкс мало (ringing). */
+/* @250 кбод: символ ≈40 мкс. DE lead — несколько символов после DE↑. */
 #define RS_BUS_DE_LEAD_US 300u
-/* @2 Мбод IDLE≈5 мкс: IRQ во время Transmit → щель → мастер short_hold на сироте-5A. */
-/* Leading FF: фронт DE / sync. Trailing FF: CRC не на срезе DE↓ (Live: need-1). */
+/* Leading FF: фронт DE / sync. Trailing FF: CRC не на срезе DE↓. */
 #define RS_BUS_TX_PAD_N    4u
 #define RS_BUS_TX_TRAIL_N  4u
 
@@ -383,7 +382,6 @@ HAL_StatusTypeDef RsBus_SendFrame(RsBusContext *ctx,
     uint8_t wire[RS_BUS_MAX_FRAME_SIZE + RS_BUS_TX_PAD_N + RS_BUS_TX_TRAIL_N];
     uint16_t frame_len;
     uint16_t wire_len;
-    uint32_t primask;
     HAL_StatusTypeDef st;
 
     if (ctx == 0 || ctx->uart == 0) {
@@ -403,16 +401,13 @@ HAL_StatusTypeDef RsBus_SendFrame(RsBusContext *ctx,
     (void)HAL_UART_AbortReceive(ctx->uart);
     rs_bus_de_set(ctx, GPIO_PIN_SET);
     rs_bus_delay_us(RS_BUS_DE_LEAD_US);
-    /* TouchGFX/SysTick иначе вставляют щель >1 симв → IDLE на мастере mid-RSP. */
-    primask = __get_PRIMASK();
-    __disable_irq();
-    st = HAL_UART_Transmit(ctx->uart, wire, wire_len, 20u);
-    if (primask == 0u) {
-        __enable_irq();
-    }
+    /* Не __disable_irq на весь TX: @250 кбод кадр до ~11 мс — SysTick/
+     * TouchGFX/таймер удержания «ПУСК» отстают (Live: countdown медленный).
+     * Мастер на Receive_DMA без IDLE — щель между байтами допустима. */
+    st = HAL_UART_Transmit(ctx->uart, wire, wire_len, 50u);
     rs_bus_wait_tx_complete(ctx->uart);
-    /* Trailing FF уже после CRC; короткий hold на всякий случай. */
-    rs_bus_delay_us(50u);
+    /* Trailing FF уже после CRC; hold ~2–3 символа. */
+    rs_bus_delay_us(100u);
     rs_bus_de_set(ctx, GPIO_PIN_RESET);
     rs_bus_delay_us(RS_BUS_DE_LEAD_US);
     rs_bus_rx_arm(ctx);
