@@ -27,13 +27,7 @@
 #define RS_V3_BLINK_HALF_MS         800u
 /* После последнего ZONE/DEV TLV — сохранить Flash (не на каждый POLL). */
 #define RS_V3_CATALOG_FLASH_QUIET_MS 400u
-/* ПУСК СП: повтор до эффекта в ZONES (ACK ≠ Phase2; хост может silent no-op). */
-#define RS_V3_START_SP_RETRY_MS     200u
-/* Ретраи EVT до подтверждения хоста в ZONES (не по ACK). */
-#define RS_V3_START_SP_CONFIRM_MS   12000u
-#define RS_V3_START_ALL_CONFIRM_MS  12000u
-#define RS_V3_STOP_CONFIRM_MS       12000u
-/* Fire-ctrl в слоте без ACK: сброс слота и решение по свежим ZONES (не вечный dedupe). */
+/* Fire-ctrl: sticky тот же seq до ACK доставки. Эффект (тушить/нет) — только ППКУ. */
 #define RS_V3_EVT_INFLIGHT_TIMEOUT_MS 1500u
 /* HAS_FAULTS=0 при живом UI — не мигать «НОРМА» на один POLL. */
 #define RS_V3_FAULT_CLEAR_SAFE_MS   500u
@@ -157,19 +151,12 @@ static RsPanelV3Event s_evt_q[RS_V3_EVT_Q_MAX];
 static uint8_t s_evt_q_n;
 static RsPanelV3Event s_evt_q_crit[RS_V3_EVT_Q_MAX];
 static uint8_t s_evt_q_crit_n;
-/* Повтор PostEvent после hold, пока слот/очередь не приняли. */
+/* Повтор PostEvent, пока слот/очередь не приняли (только доставка до ACK). */
 static uint8_t s_start_all_evt_pending;
-static uint32_t s_start_all_confirm_until_ms; /* UI-hold; не сбрасывать на ACK */
-static uint16_t s_start_all_confirm_retry_ms;
-static uint8_t s_start_all_ack_done; /* 1 = EVT ACK — больше не ретраить COMMIT */
 static uint8_t s_fire_reset_evt_pending;
 static uint8_t s_fire_reset_evt_zone; /* zone на момент commit RESET */
 static uint8_t s_start_sp_evt_pending;
 static uint8_t s_stop_launch_evt_pending;
-static uint32_t s_stop_confirm_until_ms; /* до ACK — доставка; после ACK — ZONES goal */
-static uint16_t s_stop_confirm_retry_ms;
-static uint8_t s_stop_ack_done;
-static uint8_t s_stop_want_paused; /* 1=ждём PAUSED, 0=ждём resume(COUNTDOWN) */
 /* Уровни кнопок (антидребезг / SM). OnButtonSample не постит STOP/SP — только Drain. */
 static uint8_t s_btn_start_sp_down;
 static uint8_t s_btn_stop_evt_down;
@@ -181,21 +168,15 @@ static uint16_t s_hold_start_sp_ms;      /* длительность зажат�
 static uint8_t s_hold_start_sp_cd;       /* фаза UI-таймера (малая) */
 static uint16_t s_hold_start_sp_cd_ms;
 static uint8_t s_hold_start_sp_committed;
-/* После START_SP (RELEASE): ретраи каждые RS_V3_START_SP_RETRY_MS, пока есть что стартовать. */
-static uint32_t s_start_sp_confirm_until_ms; /* гасить при !should_retry / таймаут; ACK без still_need — тоже */
-static uint16_t s_start_sp_confirm_retry_ms;
-static uint8_t s_start_sp_ack_done;
 /* ОСТАНОВ: фронт press → STOP; удержание ≥5с → RESET. */
 static uint16_t s_stop_press_ms;
 
 static void rs_v3_restore_start_all_idle_leds(void);
 static void rs_v3_post_start_sp(void);
-static void rs_v3_arm_start_sp_confirm(void);
-static uint8_t rs_v3_start_sp_should_retry(void);
 static void rs_v3_post_start_all_commit(void);
 static void rs_v3_post_stop_launch(void);
-static void rs_v3_cancel_start_sp_confirm(void);
-static void rs_v3_cancel_stop_confirm(void);
+static void rs_v3_cancel_start_sp(void);
+static void rs_v3_cancel_stop(void);
 static void rs_v3_evt_q_crit_remove_type_zone(uint8_t type, uint8_t zone);
 static void rs_v3_force_fire_event(uint8_t type, uint8_t zone);
 static void rs_v3_evt_inflight_watchdog(void);
@@ -274,17 +255,10 @@ void RsPanelV3Slave_Init(void)
     s_evt_q_crit_n = 0u;
     memset(s_evt_q_crit, 0, sizeof(s_evt_q_crit));
     s_start_all_evt_pending = 0u;
-    s_start_all_confirm_until_ms = 0u;
-    s_start_all_confirm_retry_ms = 0u;
-    s_start_all_ack_done = 0u;
     s_fire_reset_evt_pending = 0u;
     s_fire_reset_evt_zone = 0u;
     s_start_sp_evt_pending = 0u;
     s_stop_launch_evt_pending = 0u;
-    s_stop_confirm_until_ms = 0u;
-    s_stop_confirm_retry_ms = 0u;
-    s_stop_ack_done = 0u;
-    s_stop_want_paused = 0u;
     s_btn_start_sp_down = 0u;
     s_btn_stop_evt_down = 0u;
     s_drain_posted_stop = 0u;
@@ -293,9 +267,6 @@ void RsPanelV3Slave_Init(void)
     s_hold_start_sp_cd = 0u;
     s_hold_start_sp_cd_ms = 0u;
     s_hold_start_sp_committed = 0u;
-    s_start_sp_confirm_until_ms = 0u;
-    s_start_sp_confirm_retry_ms = 0u;
-    s_start_sp_ack_done = 0u;
     s_stop_press_ms = 0u;
     /* Flash-каталог: при совпадении CRC с ППКУ rewrite пропускается. */
     if (rs_v3_catalog_flash_load() == 0u) {
@@ -425,34 +396,30 @@ static void rs_v3_evt_q_crit_remove_type_zone(uint8_t type, uint8_t zone)
     }
 }
 
-static void rs_v3_cancel_start_sp_confirm(void)
+static void rs_v3_cancel_start_sp(void)
 {
-    s_start_sp_confirm_until_ms = 0u;
-    s_start_sp_confirm_retry_ms = 0u;
-    s_start_sp_ack_done = 0u;
+    uint8_t z = s_event_crit.zone;
     s_start_sp_evt_pending = 0u;
-    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_SP, 0u);
     if (s_event_crit.seq != 0u &&
-        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_SP &&
-        s_event_crit.zone == 0u) {
+        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_SP) {
         rs_v3_evt_clear_inflight_crit();
-        rs_v3_evt_flush_crit();
     }
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_SP, z);
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_SP, 0u);
+    rs_v3_evt_flush_crit();
 }
 
-static void rs_v3_cancel_stop_confirm(void)
+static void rs_v3_cancel_stop(void)
 {
-    s_stop_confirm_until_ms = 0u;
-    s_stop_confirm_retry_ms = 0u;
-    s_stop_ack_done = 0u;
+    uint8_t z = s_event_crit.zone;
     s_stop_launch_evt_pending = 0u;
-    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, 0u);
     if (s_event_crit.seq != 0u &&
-        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH &&
-        s_event_crit.zone == 0u) {
+        s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH) {
         rs_v3_evt_clear_inflight_crit();
-        rs_v3_evt_flush_crit();
     }
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, z);
+    rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, 0u);
+    rs_v3_evt_flush_crit();
 }
 
 static uint8_t rs_v3_evt_q_find(uint8_t type, uint8_t zone)
@@ -614,85 +581,6 @@ uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
     return rs_v3_evt_enqueue_tail(type, zone, u8_a, u16_a, u16_b);
 }
 
-/* ПУСК СП/ОБЩИЙ: ретраи пока есть зоны, которые ещё ждут пуска.
- * FIRE1 тоже: иначе после ACK confirm гасится в ПОЖАР1, а хост ещё no-op.
- * Не считать «готово» по любому EXTINGUISHING — иначе СП гаснет из‑за другой зоны. */
-static uint8_t rs_v3_zones_still_need_start(const RsPanelV3Zones *z)
-{
-    uint8_t i;
-    if (z == 0) {
-        return 0u;
-    }
-    for (i = 0u; i < z->count && i < RS_PANEL_V3_MAX_ZONES; i++) {
-        const uint8_t st = z->items[i].status;
-        if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
-            st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
-            st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED ||
-            st == (uint8_t)RS_PANEL_V3_ZONE_EXT_ABORT ||
-            st == (uint8_t)RS_PANEL_V3_ZONE_FIRE1) {
-            return 1u;
-        }
-    }
-    return 0u;
-}
-
-/* Ретраи START_SP только если есть работа: still_need, либо fire без снимка зон.
- * Без пожара / пустые зоны / эффект уже есть → 0 (один post достаточно). */
-static uint8_t rs_v3_start_sp_should_retry_zones(const RsPanelV3Zones *z,
-                                                uint8_t zones_valid)
-{
-    if (zones_valid != 0u && z != 0 &&
-        rs_v3_zones_still_need_start(z) != 0u) {
-        return 1u;
-    }
-    if (s_fire_active != 0u &&
-        (zones_valid == 0u || z == 0 || z->count == 0u)) {
-        return 1u;
-    }
-    return 0u;
-}
-
-static uint8_t rs_v3_start_sp_should_retry(void)
-{
-    return rs_v3_start_sp_should_retry_zones(&s_zones, s_zones_valid);
-}
-
-static void rs_v3_arm_start_sp_confirm(void)
-{
-    s_start_sp_confirm_until_ms = HAL_GetTick() + RS_V3_START_SP_CONFIRM_MS;
-    s_start_sp_confirm_retry_ms = 0u;
-    s_start_sp_ack_done = 0u;
-}
-
-/* ОСТАНОВ: хост уже в нужном состоянии (пауза или resume). */
-static uint8_t rs_v3_zones_stop_goal_met(const RsPanelV3Zones *z)
-{
-    uint8_t i;
-    uint8_t any = 0u;
-    uint8_t any_cd = 0u;
-    uint8_t any_paused = 0u;
-    if (z == 0) {
-        return 1u;
-    }
-    for (i = 0u; i < z->count && i < RS_PANEL_V3_MAX_ZONES; i++) {
-        const uint8_t st = z->items[i].status;
-        if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) {
-            any = 1u;
-            any_cd = 1u;
-        } else if (st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED) {
-            any = 1u;
-            any_paused = 1u;
-        }
-    }
-    if (any == 0u) {
-        return 1u;
-    }
-    if (s_stop_want_paused != 0u) {
-        return (any_cd == 0u && any_paused != 0u) ? 1u : 0u;
-    }
-    return (any_paused == 0u && any_cd != 0u) ? 1u : 0u;
-}
-
 /* Fire-ctrl: всегда НОВЫЙ seq в critical слот. Только critical lane.
  * Sticky same-type без ACK давал «куча нажатий → 0 эффектов». */
 static void rs_v3_force_fire_event(uint8_t type, uint8_t zone)
@@ -712,18 +600,16 @@ static void rs_v3_force_fire_event(uint8_t type, uint8_t zone)
 
 static void rs_v3_post_start_sp_raw(void)
 {
-    /* zone=0 — все awaiting (как ОСТАНОВ / надёжный Phase2All на ППКУ). */
-    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_START_SP, 0u);
+    /* zone=s_selected_zone (стрелки); 0 — все awaiting на ППКУ. */
+    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_START_SP, s_selected_zone);
     s_start_sp_evt_pending = 0u;
 }
 
 static void rs_v3_post_start_sp(void)
 {
-    /* ПУСК СП на хосте снимает паузу (Phase2AllPending) — не держать STOP confirm. */
-    rs_v3_cancel_stop_confirm();
-    /* UI только из ZONES хоста — без optimistic ТУШЕНИЕ/ПАУЗА. */
+    /* Новый press — отменить незакрытый STOP; эффект тушения решает ППКУ. */
+    rs_v3_cancel_stop();
     rs_v3_post_start_sp_raw();
-    rs_v3_arm_start_sp_confirm();
 }
 
 static void rs_v3_post_start_all_commit(void)
@@ -756,51 +642,27 @@ static void rs_v3_post_start_all_commit(void)
         rs_v3_dbg_sa_mark(1u);
     }
     /* >>> RS_V3_DBG_START_ALL_LAG END */
-    s_start_all_confirm_until_ms = HAL_GetTick() + RS_V3_START_ALL_CONFIRM_MS;
-    s_start_all_confirm_retry_ms = 0u;
-    s_start_all_ack_done = 0u;
 }
 
 static void rs_v3_post_stop_launch_raw(void)
 {
-    /* zone=0 → на ППКУ Fire_PanelStopAllZones (пауза/resume всех).
+    /* zone=s_selected_zone; 0 — пауза/resume всех countdown на ППКУ.
      * Новый seq на каждый press — иначе sticky same-seq = master no-op. */
-    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, 0u);
+    rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH, s_selected_zone);
     s_stop_launch_evt_pending = 0u;
 }
 
 static void rs_v3_post_stop_launch(void)
 {
-    uint8_t i;
-    /* Ретраи START_SP / COMMIT после ОСТАНОВ снова зовут Phase2 и снимают паузу. */
-    rs_v3_cancel_start_sp_confirm();
-    s_start_all_confirm_until_ms = 0u;
-    s_start_all_confirm_retry_ms = 0u;
-    s_start_all_ack_done = 0u;
+    /* ОСТАНОВ отменяет незакрытый ПУСК — иначе Phase2 снимет паузу. */
+    rs_v3_cancel_start_sp();
     s_start_all_evt_pending = 0u;
     rs_v3_evt_q_crit_remove_type_zone((uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT, 0u);
     if (s_event_crit.seq != 0u &&
         s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT) {
-        /* Не сохранять COMMIT в очередь — после STOP он снова Phase2. */
         rs_v3_evt_clear_inflight_crit();
     }
-    /* Цель по текущему ZONES: есть COUNTDOWN → пауза; иначе resume. */
-    s_stop_want_paused = 0u;
-    if (s_zones_valid != 0u) {
-        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
-            if (s_zones.items[i].status == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN) {
-                s_stop_want_paused = 1u;
-                break;
-            }
-        }
-    } else {
-        s_stop_want_paused = 1u;
-    }
     rs_v3_post_stop_launch_raw();
-    /* До ACK — ретраи доставки; после ACK — только ZONES (без второго toggle). */
-    s_stop_confirm_until_ms = HAL_GetTick() + RS_V3_STOP_CONFIRM_MS;
-    s_stop_confirm_retry_ms = 0u;
-    s_stop_ack_done = 0u;
 }
 
 static void rs_v3_evt_retry_sticky(void)
@@ -816,7 +678,7 @@ static void rs_v3_evt_retry_sticky(void)
             s_fire_reset_evt_pending = 0u;
         }
     }
-    if (s_start_sp_evt_pending != 0u && s_stop_confirm_until_ms == 0u) {
+    if (s_start_sp_evt_pending != 0u) {
         rs_v3_post_start_sp_raw();
     }
     if (s_stop_launch_evt_pending != 0u) {
@@ -1872,32 +1734,9 @@ static void rs_v3_apply_zones(const RsPanelV3Zones *z)
     }
     /* Статусы/таймер на экране — только снимок хоста (без optimistic). */
     if (from_host != 0u) {
-        /* START_ALL: count==0 не значит «пуск выполнен». */
-        if (z->count > 0u && rs_v3_zones_still_need_start(z) == 0u) {
-            if (s_start_all_confirm_until_ms != 0u) {
-                s_start_all_confirm_until_ms = 0u;
-                s_start_all_confirm_retry_ms = 0u;
-                s_start_all_ack_done = 0u;
-            }
-        }
-        /* START_SP: гасить по ZONES только после ACK (до ACK idle ZONES
-         * иначе убивают доставку — Fire_OnPanelStartSp «пропускает»). */
-        if (s_start_sp_confirm_until_ms != 0u &&
-            s_start_sp_ack_done != 0u &&
-            rs_v3_start_sp_should_retry_zones(z, 1u) == 0u) {
-            s_start_sp_confirm_until_ms = 0u;
-            s_start_sp_confirm_retry_ms = 0u;
-        }
         s_zones_apply_gen++;
         if (s_zones_apply_gen == 0u) {
             s_zones_apply_gen = 1u;
-        }
-        /* STOP: idle ZONES (= goal_met) не гасить до ACK — иначе lost EVT. */
-        if (s_stop_confirm_until_ms != 0u &&
-            s_stop_ack_done != 0u &&
-            rs_v3_zones_stop_goal_met(z) != 0u) {
-            s_stop_confirm_until_ms = 0u;
-            s_stop_confirm_retry_ms = 0u;
         }
         s_zones = *z;
     } else if (s_zones_valid == 0u) {
@@ -2082,8 +1921,7 @@ static void rs_v3_apply_poll_acks_raw(RsPanelV3Ack *ack, RsPanelV3Ack *ack_crit)
         const uint8_t acked_seq = ack_crit->seq;
         rs_v3_evt_clear_inflight_crit();
         if (acked_type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT) {
-            /* ACK есть; ретраи COMMIT — до EXTINGUISHING в ZONES (как ПУСК СП). */
-            s_start_all_ack_done = 1u;
+            /* ACK = ППКУ принял команду; тушить/нет решает хост. */
             s_start_all_evt_pending = 0u;
             /* >>> RS_V3_DBG_START_ALL_LAG BEGIN */
             {
@@ -2101,26 +1939,9 @@ static void rs_v3_apply_poll_acks_raw(RsPanelV3Ack *ack, RsPanelV3Ack *ack_crit)
             }
             /* >>> RS_V3_DBG_START_ALL_LAG END */
         } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_START_SP) {
-            /* ACK ≠ тушение на хосте. Не постить новый seq здесь:
-             * s_zones ещё старые (apply_zones ниже в этом же POLL) — при FIRE1
-             * should_retry==1 всегда → лишний EVT до свежих ZONES.
-             * Ретраи: confirm-loop 200 мс / apply_zones после host-ZONES. */
-            s_start_sp_ack_done = 1u;
             s_start_sp_evt_pending = 0u;
-            if (s_start_sp_confirm_until_ms != 0u &&
-                rs_v3_start_sp_should_retry() == 0u) {
-                /* Idle / эффект уже в кэше зон — одного post+ACK достаточно. */
-                s_start_sp_confirm_until_ms = 0u;
-                s_start_sp_confirm_retry_ms = 0u;
-            }
         } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH) {
-            /* ACK = Fire_OnPanelStopLaunch вызван. Дальше без авто-EVT (toggle). */
-            s_stop_ack_done = 1u;
             s_stop_launch_evt_pending = 0u;
-            s_stop_confirm_retry_ms = 0u;
-            if (s_zones_valid != 0u && rs_v3_zones_stop_goal_met(&s_zones) != 0u) {
-                s_stop_confirm_until_ms = 0u;
-            }
         } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET) {
             s_fire_reset_evt_pending = 0u;
         }
@@ -2637,102 +2458,8 @@ void RsPanelV3Slave_OnButtonSample(void)
             s_hold_start_sp_ms = 0u;
         }
     }
-    /* ПУСК СП confirm-retry:
-     * До ACK: НЕ force new seq каждые 200 мс — BuildRsp уже повторяет тот же
-     * s_event_crit. Новый seq срывает ACK (хост ACKит старый, панель уже на новом).
-     * Новый seq до ACK — только inflight watchdog (1.5 с).
-     * После ACK: новый seq только если still_need (FIRE1/countdown). */
-    if (s_start_sp_confirm_until_ms != 0u) {
-        if ((int32_t)(now - s_start_sp_confirm_until_ms) >= 0) {
-            s_start_sp_confirm_until_ms = 0u;
-            s_start_sp_confirm_retry_ms = 0u;
-            s_start_sp_ack_done = 0u;
-        } else if (s_start_sp_ack_done != 0u &&
-                   rs_v3_start_sp_should_retry() == 0u) {
-            s_start_sp_confirm_until_ms = 0u;
-            s_start_sp_confirm_retry_ms = 0u;
-        } else if (s_start_sp_ack_done == 0u) {
-            /* До ACK: critical слот пуст — восстановить EVT. */
-            if (s_stop_confirm_until_ms != 0u) {
-                rs_v3_cancel_stop_confirm();
-            }
-            if (s_event_crit.seq == 0u ||
-                s_event_crit.type != (uint8_t)RS_PANEL_V3_EVT_START_SP) {
-                if (s_start_sp_confirm_retry_ms < 0xFFF0u) {
-                    s_start_sp_confirm_retry_ms =
-                        (uint16_t)(s_start_sp_confirm_retry_ms + 10u);
-                }
-                if (s_start_sp_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
-                    s_start_sp_confirm_retry_ms = 0u;
-                    rs_v3_post_start_sp_raw();
-                }
-            } else {
-                s_start_sp_confirm_retry_ms = 0u;
-            }
-        } else if (rs_v3_start_sp_should_retry() != 0u) {
-            if (s_stop_confirm_until_ms != 0u) {
-                rs_v3_cancel_stop_confirm();
-            }
-            if (s_start_sp_confirm_retry_ms < 0xFFF0u) {
-                s_start_sp_confirm_retry_ms =
-                    (uint16_t)(s_start_sp_confirm_retry_ms + 10u);
-            }
-            if (s_start_sp_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
-                s_start_sp_confirm_retry_ms = 0u;
-                rs_v3_post_start_sp_raw();
-            }
-        }
-    }
-    /* ПУСК ОБЩИЙ: до ACK — ретраи EVT; после ACK — ждём host-ZONES (сброс в apply_zones). */
-    if (s_start_all_confirm_until_ms != 0u) {
-        if ((int32_t)(now - s_start_all_confirm_until_ms) >= 0) {
-            s_start_all_confirm_until_ms = 0u;
-            s_start_all_confirm_retry_ms = 0u;
-            s_start_all_ack_done = 0u;
-        } else if (s_start_all_ack_done == 0u) {
-            if (s_start_all_confirm_retry_ms < 0xFFF0u) {
-                s_start_all_confirm_retry_ms =
-                    (uint16_t)(s_start_all_confirm_retry_ms + 10u);
-            }
-            if (s_start_all_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
-                s_start_all_confirm_retry_ms = 0u;
-                if (RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_START_ALL_COMMIT,
-                                             0u, 0u, 0u, 0u) == 0u) {
-                    s_start_all_evt_pending = 1u;
-                } else {
-                    s_start_all_evt_pending = 0u;
-                }
-            }
-        }
-    }
-    /* ОСТАНОВ: до ACK — sticky seq (BuildRsp повторяет); force new seq только
-     * если critical слот пуст / не STOP. После ACK — без авто-EVT (toggle). */
-    if (s_stop_confirm_until_ms != 0u) {
-        if ((int32_t)(now - s_stop_confirm_until_ms) >= 0) {
-            s_stop_confirm_until_ms = 0u;
-            s_stop_confirm_retry_ms = 0u;
-            s_stop_ack_done = 0u;
-        } else if (s_stop_ack_done != 0u &&
-                   s_zones_valid != 0u &&
-                   rs_v3_zones_stop_goal_met(&s_zones) != 0u) {
-            s_stop_confirm_until_ms = 0u;
-            s_stop_confirm_retry_ms = 0u;
-        } else if (s_stop_ack_done == 0u) {
-            if (s_event_crit.seq != 0u &&
-                s_event_crit.type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH) {
-                s_stop_confirm_retry_ms = 0u;
-            } else {
-                if (s_stop_confirm_retry_ms < 0xFFF0u) {
-                    s_stop_confirm_retry_ms =
-                        (uint16_t)(s_stop_confirm_retry_ms + 10u);
-                }
-                if (s_stop_confirm_retry_ms >= RS_V3_START_SP_RETRY_MS) {
-                    s_stop_confirm_retry_ms = 0u;
-                    rs_v3_post_stop_launch_raw();
-                }
-            }
-        }
-    }
+    /* Fire-ctrl: sticky same-seq в BuildRsp до ACK. Повтор post — только
+     * s_*_evt_pending (слот был занят) / inflight watchdog. */
     s_btn_start_sp_down = fire_down;
     s_drain_posted_stop = 0u;
 

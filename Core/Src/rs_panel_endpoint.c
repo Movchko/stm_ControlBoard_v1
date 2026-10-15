@@ -635,13 +635,11 @@ static void rs_endpoint_on_frame(const RsBusFrameView *frame, void *ctx)
             {
                 uint8_t payload[96];
                 uint16_t plen;
-                /* SYS-only POLL (скан): минимальный RSP (ver). */
-                if (frame->payload_len <= 5u) {
-                    payload[0] = RS_PANEL_V3_VERSION;
-                    plen = 1u;
-                } else {
-                    plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
-                }
+                /* Всегда полный BuildRsp (24 Б + EVT). Раньше SYS-only POLL
+                 * (≤5 Б — норма при тишине/пожаре без дельты ZONES) давал
+                 * RSP=ver(1) → DecodeRsp fail, START_SP/STOP не уходили до
+                 * следующего TIME/ZONES (>5 Б) — задержка в секунды. */
+                plen = RsPanelV3Slave_BuildRsp(payload, sizeof(payload));
                 if (plen > 0u && plen <= (uint16_t)sizeof(s_pending_poll_rsp)) {
                     memcpy(s_pending_poll_rsp, payload, plen);
                     s_pending_poll_rsp_len = plen;
