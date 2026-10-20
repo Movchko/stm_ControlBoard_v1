@@ -24,7 +24,7 @@
 extern void SaveConfig(void);
 
 #define RS_V3_HOLD_START_ALL_MS     3000u /* ПУСК ОБЩИЙ: отсчёт на экране */
-#define RS_V3_SP_ARM_MS             2000u /* ПУСК СП (малая): до появления таймера */
+#define RS_V3_SP_ARM_MS             2000u /* ПУСК СП (большая): hold ≥2с → без EVT */
 #define RS_V3_SP_COUNTDOWN_MS       3000u /* ПУСК СП (малая): отсчёт = как ОБЩИЙ */
 #define RS_V3_HOLD_FIRE_RESET_MS    5000u /* ОСТАНОВ: сброс пожара */
 #define RS_V3_BLINK_HALF_MS         800u
@@ -160,21 +160,23 @@ static uint8_t s_fire_reset_evt_pending;
 static uint8_t s_fire_reset_evt_zone; /* zone на момент commit RESET */
 static uint8_t s_start_sp_evt_pending;
 static uint8_t s_stop_launch_evt_pending;
-/* Уровни кнопок (антидребезг / SM). OnButtonSample не постит STOP/SP — только Drain. */
+/* Уровни кнопок (антидребезг / SM). */
 static uint8_t s_btn_start_sp_down;
 static uint8_t s_btn_stop_evt_down;
-/* 1 = в этом тике Drain уже отправил STOP (не дублировать из OnButtonSample). */
-static uint8_t s_drain_posted_stop;
-/* ПУСК СП: hold_ms; малая — arm 2с → countdown 3с → START_ALL_COMMIT. */
+/* ПУСК СП: малая — сразу UI-таймер 3с → START_ALL_COMMIT; отпуск раньше → START_SP.
+ * Большая: RELEASE <2с → START_SP; hold ≥2с → без EVT. */
 static uint8_t s_hold_start_sp;          /* кнопка зажата (малая) */
 static uint16_t s_hold_start_sp_ms;      /* длительность зажатия FIRE (малая/большая) */
 static uint8_t s_hold_start_sp_cd;       /* фаза UI-таймера (малая) */
 static uint16_t s_hold_start_sp_cd_ms;
 static uint8_t s_hold_start_sp_committed;
-/* ОСТАНОВ: фронт press → STOP; удержание ≥5с → RESET. */
+/* ОСТАНОВ: RELEASE <5с → STOP (пауза/resume); hold ≥5с при пожаре → RESET. */
 static uint16_t s_stop_press_ms;
 
 static void rs_v3_restore_start_all_idle_leds(void);
+static void rs_v3_restore_beep_after_hold_cancel(void);
+static void rs_v3_cancel_local_holds(void);
+static void rs_v3_push_fire_ui_clear(void);
 static void rs_v3_post_start_sp(void);
 static void rs_v3_post_start_all_commit(void);
 static void rs_v3_post_stop_launch(void);
@@ -185,7 +187,11 @@ static void rs_v3_force_fire_event(uint8_t type, uint8_t zone);
 static void rs_v3_evt_inflight_watchdog(void);
 static void rs_v3_apply_zones(const RsPanelV3Zones *z);
 static uint8_t rs_v3_has_attention_faults(void);
+static uint8_t rs_v3_zone_is_terminal(uint8_t st);
+static uint8_t rs_v3_fire_in_post_extinguish_duty(void);
+static uint8_t rs_v3_allow_fault_signal_now(void);
 static void rs_v3_fault_beep(uint8_t attn, uint8_t signal);
+static void rs_v3_on_fault_signal_done(void);
 static void rs_v3_fault_sound_after_resync(void);
 static void rs_v3_sync_led_stop_status(void);
 static void rs_v3_sync_fire_indication(void);
@@ -265,12 +271,12 @@ void RsPanelV3Slave_Init(void)
     s_stop_launch_evt_pending = 0u;
     s_btn_start_sp_down = 0u;
     s_btn_stop_evt_down = 0u;
-    s_drain_posted_stop = 0u;
     s_hold_start_sp = 0u;
     s_hold_start_sp_ms = 0u;
     s_hold_start_sp_cd = 0u;
     s_hold_start_sp_cd_ms = 0u;
     s_hold_start_sp_committed = 0u;
+    s_stop_press_ms = 0u;
     s_stop_press_ms = 0u;
     /* Flash-каталог: при совпадении CRC с ППКУ rewrite пропускается. */
     if (rs_v3_catalog_flash_load() == 0u) {
@@ -742,6 +748,45 @@ static void rs_v3_restore_start_all_idle_leds(void)
     Led_Set(LED_STR_START_ALL, 1u);
 }
 
+/* Сброс локальных hold UI (ПУСК ОБЩИЙ / ПУСК СП) — после FIRE_RESET / ухода пожара. */
+static void rs_v3_cancel_local_holds(void)
+{
+    const uint8_t had_hold =
+        (s_hold_start_all != 0u && s_hold_start_all_committed == 0u) ||
+        (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) ? 1u : 0u;
+
+    if (s_hold_start_all != 0u) {
+        s_hold_start_all = 0u;
+        s_hold_start_all_ms = 0u;
+        if (s_hold_start_all_committed == 0u) {
+            rs_v3_restore_start_all_idle_leds();
+        }
+        s_hold_start_all_committed = 0u;
+    }
+    if (s_hold_start_sp != 0u || s_hold_start_sp_cd != 0u) {
+        s_hold_start_sp = 0u;
+        s_hold_start_sp_ms = 0u;
+        s_hold_start_sp_cd = 0u;
+        s_hold_start_sp_cd_ms = 0u;
+        s_hold_start_sp_committed = 0u;
+    }
+    if (had_hold != 0u) {
+        rs_v3_restore_beep_after_hold_cancel();
+    }
+}
+
+static void rs_v3_push_fire_ui_clear(void)
+{
+    char names[16][ZONE_NAME_SIZE + 1];
+    uint8_t modes[16];
+    uint8_t rems[16];
+
+    memset(names, 0, sizeof(names));
+    memset(modes, 0, sizeof(modes));
+    memset(rems, 0, sizeof(rems));
+    RsPanelEndpoint_QueueFireUi(0u, 0u, 0u, 0u, names, modes, rems);
+}
+
 static uint8_t rs_v3_has_attention_faults(void)
 {
     uint16_t i;
@@ -751,6 +796,42 @@ static uint8_t rs_v3_has_attention_faults(void)
         }
     }
     return 0u;
+}
+
+/* ТУШ.ВЫП / ТУШ.ОШ / ТУШ.ОСТ — дежурный звук пожара; здесь новая неиспр. должна SIGNAL. */
+static uint8_t rs_v3_fire_in_post_extinguish_duty(void)
+{
+    uint8_t i;
+    uint8_t any_ext = 0u;
+    uint8_t any_zone = 0u;
+    uint8_t all_terminal = 1u;
+
+    if (s_fire_active == 0u || s_zones_valid == 0u || s_zones.count == 0u) {
+        return 0u;
+    }
+    for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+        const uint8_t st = s_zones.items[i].status;
+        if (st == 0u) {
+            continue;
+        }
+        any_zone = 1u;
+        if (st == (uint8_t)RS_PANEL_V3_ZONE_EXTINGUISHING) {
+            any_ext = 1u;
+        }
+        if (rs_v3_zone_is_terminal(st) == 0u) {
+            all_terminal = 0u;
+        }
+    }
+    return (any_ext == 0u && any_zone != 0u && all_terminal != 0u) ? 1u : 0u;
+}
+
+static uint8_t rs_v3_allow_fault_signal_now(void)
+{
+    if (s_fire_active == 0u) {
+        return 1u;
+    }
+    /* Активный ПОЖАР/тушение — fault SIGNAL не перебивает. После тушения — да. */
+    return rs_v3_fire_in_post_extinguish_duty();
 }
 
 /* signal=1 → сигнальный пакет, затем WAIT_DUTY; signal=0 → сразу дежурный. */
@@ -778,6 +859,28 @@ static void rs_v3_fault_beep(uint8_t attn, uint8_t signal)
     }
     s_fault_sound_phase = RS_V3_FS_DUTY;
     s_fault_sound_deadline_ms = 0u;
+}
+
+/* После SIGNAL: снова дежурный пожара (ТУШ.ВЫП) или дежурный неисправности. */
+static void rs_v3_on_fault_signal_done(void)
+{
+    s_fault_sound_phase = RS_V3_FS_IDLE;
+    s_fault_sound_deadline_ms = 0u;
+    if (rs_v3_fire_in_post_extinguish_duty() != 0u) {
+        /* Переиграть DUTY пожара — StopPattern уже в Beeper_StartPulseTrain/конец SIGNAL. */
+        s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
+        s_fire_snd_alert_fire1 = 0u;
+        rs_v3_sync_fire_indication();
+        return;
+    }
+    if (s_fire_active != 0u) {
+        /* Успели уйти из terminal duty — фазу пожара не трогаем. */
+        return;
+    }
+    if (s_active_fault_count == 0u) {
+        return;
+    }
+    rs_v3_fault_beep(rs_v3_has_attention_faults(), 0u);
 }
 
 /* START_ALL hold / unmute — вернуть дежурный (не сигнальный). */
@@ -827,6 +930,15 @@ static void rs_v3_fault_sound_after_resync(void)
     const uint16_t pre = s_fault_pre_clear_count;
     s_fault_pre_clear_count = 0u;
     if (s_fire_active != 0u) {
+        /* После тушения (дежурный пожара) рост списка — SIGNAL, затем снова DUTY. */
+        if (rs_v3_allow_fault_signal_now() != 0u &&
+            s_active_fault_count > pre) {
+            Beeper_ResumeSoundOnNewEvent();
+            rs_v3_fault_beep(rs_v3_has_attention_faults(), 1u);
+            if (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u) {
+                RsPanelEndpoint_QueueGotoMain();
+            }
+        }
         return;
     }
     if (s_active_fault_count == 0u) {
@@ -873,34 +985,42 @@ static uint8_t rs_v3_zones_want_fire1(void)
     return any;
 }
 
-/* Статусная LED_STOP: пауза countdown / ПОЖАР·ОСТ.ПУСК / зона в ручном (mode=2). */
+/* LED_AUTO_OFF — зона mode 2/3/4 (ручной / пуск блок / пожар выкл).
+ * LED_STOP — только пауза countdown / ПОЖАР·ОСТ.ПУСК (не режим зоны). */
 static void rs_v3_sync_led_stop_status(void)
 {
-    uint8_t on = 0u;
+    uint8_t auto_off = 0u;
+    uint8_t stop_on = 0u;
     uint8_t zi;
     uint8_t i;
 
     for (zi = 0u; zi < 32u; zi++) {
+        uint8_t m;
         if (PanelHostCache_GetConst()->zone_name[zi][0] == 0) {
             continue;
         }
-        if (PPKY_ZoneFireModeGet(zi) == 2u) {
-            on = 1u;
+        m = PPKY_ZoneFireModeGet(zi);
+        if (m == 2u || m == 3u || m == 4u) {
+            auto_off = 1u;
             break;
         }
     }
-    if (on == 0u && s_fire_active != 0u && s_zones_valid != 0u) {
+    if (s_fire_active != 0u && s_zones_valid != 0u) {
         for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
             const uint8_t st = s_zones.items[i].status;
             if (st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
                 st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED) {
-                on = 1u;
+                stop_on = 1u;
                 break;
             }
         }
     }
-    Led_Set(LED_STOP, on);
-    if (on != 0u) {
+    Led_Set(LED_AUTO_OFF, auto_off);
+    if (auto_off != 0u) {
+        Led_ForceStatusBright(LED_AUTO_OFF);
+    }
+    Led_Set(LED_STOP, stop_on);
+    if (stop_on != 0u) {
         Led_ForceStatusBright(LED_STOP);
     }
 }
@@ -1325,6 +1445,9 @@ static void rs_v3_format_fire_zone_line(const RsPanelV3ZoneItem *z, char *out, u
     } else if (ch_s != 0) {
         (void)snprintf(out, out_sz, "%s %s%u",
                        zone_name, ch_s, (unsigned)z->ch_l_adr);
+    } else if (z->mcu_h_adr != 0u) {
+        (void)snprintf(out, out_sz, "%s МКУ %u",
+                       zone_name, (unsigned)z->mcu_h_adr);
     } else {
         (void)snprintf(out, out_sz, "%s", zone_name);
     }
@@ -1722,8 +1845,10 @@ static void rs_v3_apply_fault_evt(const RsPanelV3FaultEvtItem *fe)
             Led_Set(LED_ERR, 1u);
             Led_ForceStatusBright(LED_ERR);
             /* Во время resync не звук/GotoMain — иначе выкидывает из меню
-             * на каждый повторный SET старых неисправностей. */
-            if (s_fire_active == 0u && s_fault_sound_resync == 0u) {
+             * на каждый повторный SET старых неисправностей.
+             * При активном ПОЖАРЕ/тушении SIGNAL глушим; после тушения (DUTY) — играем. */
+            if (s_fault_sound_resync == 0u &&
+                rs_v3_allow_fault_signal_now() != 0u) {
                 Beeper_ResumeSoundOnNewEvent();
                 if (new_attn != 0u || rs_v3_has_attention_faults() == 0u) {
                     /* Новое ВНИМАНИЕ / неиспр. без ВНИМАНИЯ → SIGNAL (как ППКУ). */
@@ -1829,7 +1954,8 @@ static void rs_v3_apply_zones(const RsPanelV3Zones *z)
         uint8_t modes[16];
         uint8_t rems[16];
         uint8_t n = s_zones.count;
-        uint8_t active = (n > 0u) ? 1u : 0u;
+        /* Без SYS_FIRE_ACTIVE не держать «ДО ПУСКА» после сброса на ППКУ. */
+        uint8_t active = (s_fire_active != 0u && n > 0u) ? 1u : 0u;
         uint8_t mode = 0u;
         uint8_t rem = 0u;
         if (n > 16u) {
@@ -1993,6 +2119,8 @@ static void rs_v3_apply_poll_acks_raw(RsPanelV3Ack *ack, RsPanelV3Ack *ack_crit)
             s_stop_launch_evt_pending = 0u;
         } else if (acked_type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET) {
             s_fire_reset_evt_pending = 0u;
+            rs_v3_cancel_local_holds();
+            rs_v3_push_fire_ui_clear();
         }
         rs_v3_evt_retry_sticky();
         rs_v3_evt_flush_queue();
@@ -2036,6 +2164,10 @@ static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
             if (prev_fire != s_fire_active) {
                 if (s_fire_active != 0u) {
                     s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
+                } else {
+                    /* Сброс пожара: снять hold-таймер и «ДО ПУСКА» сразу. */
+                    rs_v3_cancel_local_holds();
+                    rs_v3_push_fire_ui_clear();
                 }
                 rs_v3_sync_fire_indication();
             }
@@ -2433,21 +2565,19 @@ void RsPanelV3Slave_OnButtonSample(void)
 
     rs_v3_evt_inflight_watchdog();
 
-    /* ——— ОСТАНОВ: EVT только из DrainPanelState (SampleButtons PRESS).
-     * Здесь — long-press RESET; fallback press если Drain не сработал в тике. */
+    /* ——— ОСТАНОВ ———
+     * Пауза/resume: только RELEASE, если не додержали до сброса.
+     * Сброс пожара: удержание ≥ RS_V3_HOLD_FIRE_RESET_MS при активном пожаре. */
     if (stop_down != 0u) {
         if (s_btn_stop_evt_down == 0u) {
             s_stop_press_ms = 0u;
             s_hold_reset = 0u;
             s_hold_reset_ms = 0u;
             s_hold_reset_committed = 0u;
-            if (s_drain_posted_stop == 0u) {
-                rs_v3_post_stop_launch();
-            }
         } else if (s_stop_press_ms < 0xFFF0u) {
             s_stop_press_ms = (uint16_t)(s_stop_press_ms + 10u);
         }
-        if (s_fire_active != 0u || s_hold_reset != 0u) {
+        if (s_fire_active != 0u) {
             if (s_hold_reset == 0u) {
                 s_hold_reset = 1u;
                 s_hold_reset_ms = 0u;
@@ -2459,12 +2589,17 @@ void RsPanelV3Slave_OnButtonSample(void)
                 s_hold_reset_committed == 0u) {
                 s_hold_reset_committed = 1u;
                 s_fire_reset_evt_zone = s_selected_zone;
+                rs_v3_cancel_local_holds();
                 rs_v3_force_fire_event((uint8_t)RS_PANEL_V3_EVT_FIRE_RESET,
                                        s_fire_reset_evt_zone);
                 s_fire_reset_evt_pending = 0u;
             }
         }
     } else if (s_btn_stop_evt_down != 0u) {
+        /* RELEASE: пауза/resume, если не был commit RESET. */
+        if (s_hold_reset_committed == 0u) {
+            rs_v3_post_stop_launch();
+        }
         s_hold_reset = 0u;
         s_hold_reset_ms = 0u;
         s_hold_reset_committed = 0u;
@@ -2473,25 +2608,20 @@ void RsPanelV3Slave_OnButtonSample(void)
     s_btn_stop_evt_down = stop_down;
 
     /* ——— ПУСК СП ———
-     * EVT на RELEASE при hold_ms < RS_V3_SP_ARM_MS (debounce уже в Button stack).
-     * Малая: ≥2с → UI-таймер 3с → START_ALL_COMMIT (без START_SP на этом отпускании).
-     * Большая: ≥2с → без EVT. Confirm-retry ниже (как START_ALL), и после отпускания. */
+     * Малая: с нажатия UI-таймер 3с (как ПУСК ОБЩИЙ) → START_ALL_COMMIT;
+     *        отпуск раньше commit → START_SP (пуск зоны).
+     * Большая: RELEASE <2с → START_SP; hold ≥2с → без EVT. */
     if (is_small != 0u) {
         if (fire_down != 0u) {
             if (s_hold_start_sp == 0u) {
                 s_hold_start_sp = 1u;
                 s_hold_start_sp_ms = 0u;
-                s_hold_start_sp_cd = 0u;
-                s_hold_start_sp_cd_ms = 0u;
-                s_hold_start_sp_committed = 0u;
-            } else if (s_hold_start_sp_ms < 0xFFF0u) {
-                s_hold_start_sp_ms = (uint16_t)(s_hold_start_sp_ms + 10u);
-            }
-            if (s_hold_start_sp_ms >= RS_V3_SP_ARM_MS && s_hold_start_sp_cd == 0u &&
-                s_hold_start_sp_committed == 0u) {
                 s_hold_start_sp_cd = 1u;
                 s_hold_start_sp_cd_ms = 0u;
+                s_hold_start_sp_committed = 0u;
                 rs_v3_start_hold_beep();
+            } else if (s_hold_start_sp_ms < 0xFFF0u) {
+                s_hold_start_sp_ms = (uint16_t)(s_hold_start_sp_ms + 10u);
             }
             if (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u) {
                 if (s_hold_start_sp_cd_ms < RS_V3_SP_COUNTDOWN_MS) {
@@ -2505,19 +2635,14 @@ void RsPanelV3Slave_OnButtonSample(void)
                 }
             }
         } else if (s_hold_start_sp != 0u) {
-            const uint8_t was_cd = s_hold_start_sp_cd;
             const uint8_t was_commit = s_hold_start_sp_committed;
-            const uint16_t hold_ms = s_hold_start_sp_ms;
             s_hold_start_sp = 0u;
             s_hold_start_sp_ms = 0u;
             s_hold_start_sp_cd = 0u;
             s_hold_start_sp_cd_ms = 0u;
             s_hold_start_sp_committed = 0u;
-            if (was_cd != 0u && was_commit == 0u) {
+            if (was_commit == 0u) {
                 rs_v3_restore_beep_after_hold_cancel();
-            }
-            /* Короткий отпуск → START_SP; после arm/countdown — без SP. */
-            if (was_cd == 0u && was_commit == 0u && hold_ms < RS_V3_SP_ARM_MS) {
                 rs_v3_post_start_sp();
             }
         }
@@ -2539,7 +2664,6 @@ void RsPanelV3Slave_OnButtonSample(void)
     /* Fire-ctrl: sticky same-seq в BuildRsp до ACK. Повтор post — только
      * s_*_evt_pending (слот был занят) / inflight watchdog. */
     s_btn_start_sp_down = fire_down;
-    s_drain_posted_stop = 0u;
 
     /* ——— ПУСК ОБЩИЙ hold 3с (большая; на малой FORCE может promote) ——— */
     if (all_down != 0u) {
@@ -2654,13 +2778,11 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
                 continue;
             }
             mode = PPKY_ZoneFireModeGet(zi);
-            /* 0 → 2 → 3 → 4 → 0 */
+            /* 0 → 2 → 3 → 0 (режим 4 «пожар выкл» в меню не листаем) */
             if (mode == 0u) {
                 mode = 2u;
             } else if (mode == 2u) {
                 mode = 3u;
-            } else if (mode == 3u) {
-                mode = 4u;
             } else {
                 mode = 0u;
             }
@@ -2677,17 +2799,7 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
         }
     }
 
-    /* ОСТАНОВ: PRESS → force new seq. START_SP — только RELEASE в OnButtonSample. */
-    for (i = 0u; i < ctx->pending_btn_count && i < RS_PANEL_MAX_POLL_BTN_EVENTS; i++) {
-        const RsPanelButtonEvent *be = &ctx->pending_btn[i];
-        if (be->state != (uint8_t)RS_PANEL_BUTTON_PRESS) {
-            continue;
-        }
-        if (be->type == (uint8_t)RS_PANEL_BTN_STOP) {
-            rs_v3_post_stop_launch();
-            s_drain_posted_stop = 1u;
-        }
-    }
+    /* ОСТАНОВ / ПУСК СП — только OnButtonSample (RELEASE / hold), не PRESS из Drain. */
     ctx->pending_ui_count = 0u;
     ctx->pending_btn_count = 0u;
 
@@ -2807,10 +2919,9 @@ void RsPanelV3Slave_Timer10ms(void)
         PanelJournalCache_PrefetchProcess();
     }
 
-    if (s_fire_active == 0u &&
-        s_fault_sound_phase == RS_V3_FS_WAIT_DUTY &&
+    if (s_fault_sound_phase == RS_V3_FS_WAIT_DUTY &&
         (int32_t)(now - s_fault_sound_deadline_ms) >= 0) {
-        rs_v3_fault_beep(rs_v3_has_attention_faults(), 0u);
+        rs_v3_on_fault_signal_done();
     }
 
     /* Пакет FAULT_SET — один push после паузы; только после SYS_READY.

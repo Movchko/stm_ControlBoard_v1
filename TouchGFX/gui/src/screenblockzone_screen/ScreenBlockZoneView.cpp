@@ -55,7 +55,7 @@ static const char *zoneModeStatusText(uint8_t mode)
     case 2u:
         return "РУЧНОЙ";
     case 3u:
-        return "ПУСК ВЫКЛ";
+        return "ПУСК БЛОК";
     case 4u:
         return "ПОЖАР ВЫКЛ";
     case 0u:
@@ -147,13 +147,11 @@ void ScreenBlockZoneView::cycleSelectedZoneMode()
     }
     const uint8_t zone_idx = activeZoneIdx_[selectedPos_];
     uint8_t mode = PPKY_ZoneFireModeGet(zone_idx);
-    /* 0 → 2 → 3 → 4 → 0 (пропуск автономного 1) */
+    /* 0 → 2 → 3 → 0 (пропуск автономного 1 и «пожар выкл» 4) */
     if (mode == 0u) {
         mode = 2u;
     } else if (mode == 2u) {
         mode = 3u;
-    } else if (mode == 3u) {
-        mode = 4u;
     } else {
         mode = 0u;
     }

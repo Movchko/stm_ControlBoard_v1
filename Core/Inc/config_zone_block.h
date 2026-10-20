@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-/* zone_fire_mode: 0 авто, 1 автономный, 2 ручной, 3 пуск выкл, 4 пожар выкл */
+/* zone_fire_mode: 0 авто, 1 автономный, 2 ручной, 3 пуск блок, 4 пожар выкл */
 uint8_t PPKY_ZoneFireModeGet(uint8_t zone_idx);
 void PPKY_ZoneFireModeSet(uint8_t zone_idx, uint8_t mode);
 

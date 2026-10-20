@@ -84,7 +84,7 @@
 #define SOUND_ATTN_DUTY_REPEAT_MS             5000u
 
 /* ПОЖАР/ПУСК */
-#define SOUND_FIRE_DUTY_ON_MS                   70u
+#define SOUND_FIRE_DUTY_ON_MS                  140u  /* было 70; длиннее писк после тушения */
 #define SOUND_FIRE_DUTY_OFF_MS                  50u
 #define SOUND_FIRE_DUTY_PULSES                  1u
 #define SOUND_FIRE_DUTY_REPEAT_MS            10000u

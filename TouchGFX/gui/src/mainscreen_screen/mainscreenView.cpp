@@ -160,8 +160,13 @@ static void fire_sync_top_header(mainscreenView *view, uint8_t hdr_mode, uint8_t
 	}
 #if GOST_MODE
 	const bool multi = (s_fn_n > 1u);
+	/* ПОЖАР1 / ПУСК БЛОК / тушение — шапка «ПОЖАР n/m» всегда (и при 1 зоне).
+	 * Раньше mode 6/8 при !multi обнуляли текст → после 5 с автовозврата с листания
+	 * «ПОЖАР 1/1» пропадал. */
 	const bool show_hdr = (multi || hdr_mode == 1u || hdr_mode == 5u ||
-			       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
+			       hdr_mode == 6u || hdr_mode == 8u ||
+			       hdr_mode == 2u || hdr_mode == 3u || hdr_mode == 4u ||
+			       hdr_mode == 7u || hdr_mode == 9u || s_manual_browse);
 #else
 	const bool show_hdr = (hdr_mode == 1u || hdr_mode == 5u ||
 			       hdr_mode == 6u || hdr_mode == 8u || s_manual_browse);
@@ -185,16 +190,19 @@ static void fire_sync_top_header(mainscreenView *view, uint8_t hdr_mode, uint8_t
 #endif
 	}
 #if GOST_MODE
-	if (multi || s_manual_browse) {
-		if (base[0] != '\0') {
+	if (hdr_mode == 1u || hdr_mode == 5u) {
+		/* ДО ПУСКА / ПАУЗА: одна зона — без счётчика; несколько / browse — n/m. */
+		if ((multi || s_manual_browse) && base[0] != '\0') {
 			(void)snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
 				       (unsigned)(cur_idx + 1u), (unsigned)s_fn_n);
 			view->uiSetTopHeaderText(hdr);
+		} else {
+			view->uiSetTopHeaderText(base);
 		}
-	} else if (hdr_mode == 1u || hdr_mode == 5u) {
-		view->uiSetTopHeaderText(base);
-	} else if (hdr_mode == 6u || hdr_mode == 8u) {
-		view->uiSetTopHeaderText("");
+	} else if (base[0] != '\0') {
+		(void)snprintf(hdr, sizeof(hdr), "%s %u/%u", base,
+			       (unsigned)(cur_idx + 1u), (unsigned)s_fn_n);
+		view->uiSetTopHeaderText(hdr);
 	}
 #else
 	if (s_manual_browse && base[0] != '\0') {
@@ -204,7 +212,9 @@ static void fire_sync_top_header(mainscreenView *view, uint8_t hdr_mode, uint8_t
 	} else if (base[0] != '\0') {
 		view->uiSetTopHeaderText(base);
 	} else if (hdr_mode == 6u || hdr_mode == 8u) {
-		view->uiSetTopHeaderText("");
+		(void)snprintf(hdr, sizeof(hdr), "ПОЖАР %u/%u",
+			       (unsigned)(cur_idx + 1u), (unsigned)s_fn_n);
+		view->uiSetTopHeaderText(hdr);
 	}
 #endif
 }
@@ -227,7 +237,7 @@ static void fire_fill_center_text(uint8_t mode, uint8_t remaining_s, char *buf, 
 	} else if (mode == 7u) {
 		(void)snprintf(buf, buf_sz, "ТУШ.ОШ.");
 	} else if (mode == 8u) {
-		(void)snprintf(buf, buf_sz, "ПУСК ЗАБЛ.");
+		(void)snprintf(buf, buf_sz, "ПУСК БЛОК");
 	} else if (mode == 9u) {
 		(void)snprintf(buf, buf_sz, "ТУШ.ОСТ.");
 	} else if (remaining_s > 0u) {
@@ -702,6 +712,11 @@ void mainscreenView::fireShowCurrentZone()
 			std::strncpy(s_fire_marquee_text, s_fn_names[fi], ZONE_NAME_SIZE);
 			s_fire_marquee_text[ZONE_NAME_SIZE] = '\0';
 			CustomContainerSrollText.setText(s_fn_names[fi]);
+		} else if (!CustomContainerSrollText.isMarqueeFitting() &&
+			   !CustomContainerSrollText.isMarqueeRunning()) {
+			/* Домашний пожар: тот же текст, но прокрутка остановилась — перезапуск.
+			 * Иначе после автовозврата / одного прохода бегущая «замирает». */
+			CustomContainerSrollText.restart();
 		}
 	}
 	ui_invalidate_warn_marquee_cache();
@@ -794,7 +809,7 @@ void mainscreenView::modeShowCurrent()
 	if (s_mn_modes[cur] == 2u) {
 		center = "РУЧНОЙ";
 	} else if (s_mn_modes[cur] == 3u) {
-		center = "ПУСК ВЫКЛ";
+		center = "ПУСК БЛОК";
 	} else if (s_mn_modes[cur] == 4u) {
 		center = "ПОЖАР ВЫКЛ";
 	}
