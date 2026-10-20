@@ -20,7 +20,8 @@ public:
 
 #ifndef SIMULATOR
     virtual void scrollWheel1UpdateItem(mainmenu& item, int16_t itemIndex) override;
-    static const int16_t LAMP_COUNT = 15;
+    /* 1× «ВСЁ» + 15 каналов LED */
+    static const int16_t LAMP_COUNT = 16;
     static const int16_t SOUND_COUNT = 7;
 #endif
 

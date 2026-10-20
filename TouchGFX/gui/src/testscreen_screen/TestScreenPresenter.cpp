@@ -65,7 +65,13 @@ void TestScreenPresenter::refreshStatus()
         lastPlaying = playing;
         return;
     }
-    uint8_t on = (Led_TestGet((uint8_t)currentIndex) != 0u) ? 1u : 0u;
+    uint8_t on;
+    if (currentIndex == 0) {
+        /* «ВСЁ»: Вкл только когда горят все каналы. */
+        on = Led_TestAreAllOn();
+    } else {
+        on = (Led_TestGet((uint8_t)(currentIndex - 1)) != 0u) ? 1u : 0u;
+    }
     view.updateStatusLine(currentIndex, on);
 }
 
@@ -121,9 +127,16 @@ void TestScreenPresenter::handleButton(uint8_t but, uint8_t state)
             refreshStatus();
             return;
         }
-        uint8_t cur = Led_TestGet((uint8_t)currentIndex);
-        uint8_t next = (cur != 0u) ? 0u : 1u;
-        Led_TestSet((uint8_t)currentIndex, next);
+        if (currentIndex == 0) {
+            /* «ВСЁ»: если не все горят — зажечь все; иначе погасить все. */
+            uint8_t next = (Led_TestAreAllOn() != 0u) ? 0u : 1u;
+            Led_TestSetAll(next);
+        } else {
+            const uint8_t led = (uint8_t)(currentIndex - 1);
+            uint8_t cur = Led_TestGet(led);
+            uint8_t next = (cur != 0u) ? 0u : 1u;
+            Led_TestSet(led, next);
+        }
         refreshStatus();
         return;
     }

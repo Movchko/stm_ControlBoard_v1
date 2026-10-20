@@ -317,7 +317,7 @@ static void ui_refresh_mode_list(void)
 	s_mn_n = 0u;
 	for (uint8_t zi = 0u; zi < 32 && s_mn_n < UI_LIST_CAPACITY; ++zi) {
 		const uint8_t mode = PPKY_ZoneFireModeGet(zi);
-		if (mode != 2u && mode != 3u) {
+		if (mode != 2u && mode != 3u && mode != 4u) {
 			continue;
 		}
 		const uint8_t pos = s_mn_n++;
@@ -790,7 +790,14 @@ void mainscreenView::modeShowCurrent()
 	snprintf(hdr, sizeof(hdr), "РЕЖИМ %u/%u", (unsigned)(cur + 1u), (unsigned)s_mn_n);
 	uiSetTopHeaderText(hdr);
 	memset(textArea1Buffer, 0, sizeof(textArea1Buffer));
-	const char* center = (s_mn_modes[cur] == 2u) ? "РУЧНОЙ" : "ЗАБЛОК.";
+	const char* center = "АВТОМАТ.";
+	if (s_mn_modes[cur] == 2u) {
+		center = "РУЧНОЙ";
+	} else if (s_mn_modes[cur] == 3u) {
+		center = "ПУСК ВЫКЛ";
+	} else if (s_mn_modes[cur] == 4u) {
+		center = "ПОЖАР ВЫКЛ";
+	}
 	Unicode::fromUTF8(reinterpret_cast<const uint8_t*>(center), textArea1Buffer, TEXTAREA1_SIZE);
 	textArea1Buffer[TEXTAREA1_SIZE - 1u] = 0;
 	textArea1.setWildcard(textArea1Buffer);
@@ -1236,7 +1243,11 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		}
 	}
 	if (fault_changed) {
-		const bool fault_grew = (fault_n > s_wn_n);
+		/* Как attention_new: рост ИЛИ новая сверху (idx 0) при CLEAR→SET с тем же n. */
+		const bool fault_new =
+			fault_n > s_wn_n ||
+			(fault_n > 0u && s_wn_n > 0u &&
+			 std::strncmp(s_wn_titles[0], fault_titles[0], WARNING_TITLE_LEN) != 0);
 		const uint8_t prev_cur = s_cur[BANNER_FAULT];
 		char keep_title[WARNING_TITLE_LEN];
 		const uint8_t had_cur = (s_cur[BANNER_FAULT] < s_wn_n) ? 1u : 0u;
@@ -1247,8 +1258,8 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		s_wn_n = fault_n;
 		memcpy(s_wn_titles, fault_titles, sizeof(s_wn_titles));
 		memcpy(s_wn_details, fault_details, sizeof(s_wn_details));
-		if ((s_manual_browse != 0u || s_banner_mode == BANNER_FAULT) &&
-		    had_cur != 0u && s_wn_n > 0u) {
+		/* Sticky только в ручном browse — иначе залипание на старой при новой сверху. */
+		if (s_manual_browse != 0u && had_cur != 0u && s_wn_n > 0u) {
 			uint8_t found = 0xFFu;
 			for (uint8_t i = 0u; i < s_wn_n; ++i) {
 				if (std::strncmp(s_wn_titles[i], keep_title, WARNING_TITLE_LEN) == 0) {
@@ -1260,8 +1271,8 @@ void mainscreenView::updateWarningStatus(bool active, uint8_t nItems, char (*big
 		} else if (s_cur[BANNER_FAULT] >= s_wn_n) {
 			s_cur[BANNER_FAULT] = 0u;
 		}
-		/* Рост списка: 5 с новая (idx 0), затем oldest — как ППКУ (newest-first). */
-		if (fault_grew && s_manual_browse == 0u && s_wn_n > 0u) {
+		/* Список newest-first: 5 с новая (idx 0), затем oldest (n-1). */
+		if (fault_new && s_manual_browse == 0u && s_wn_n > 0u) {
 			ui_request_new_event(BANNER_FAULT, 0u);
 			need_force = true;
 		} else if (s_cur[BANNER_FAULT] != prev_cur) {

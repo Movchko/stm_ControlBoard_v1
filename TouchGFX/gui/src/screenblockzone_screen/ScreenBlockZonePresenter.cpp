@@ -5,11 +5,9 @@
 
 #ifndef SIMULATOR
 #include "button.h"
-#include "config_ign_block_sync.h"
+#include "fire.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_protocol.h"
-
-extern void SaveConfig(void);
 #endif
 
 ScreenBlockZonePresenter::ScreenBlockZonePresenter(ScreenBlockZoneView& v)
@@ -48,13 +46,10 @@ void ScreenBlockZonePresenter::handleButton(uint8_t but, uint8_t state)
         return;
     }
     if (but == BUT_ENTER) {
-        if (view.hasActiveZones() == 0u) {
-            return;
+        /* Цикл mode + ZONE_BLOCK_SET + SaveConfig — в DrainPanelState (CONFIRM). */
+        if (Fire_IsActive() == 0u) {
+            view.refreshZoneUi();
         }
-        view.cycleSelectedZoneMode();
-        SaveConfig();
-        ConfigIgnBlockSync_Request();
-        /* ZONE_BLOCK_SET при v3 — через Drain (CONFIRM). */
     }
 }
 

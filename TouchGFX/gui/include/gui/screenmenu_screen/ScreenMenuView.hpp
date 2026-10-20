@@ -36,7 +36,9 @@ protected:
         TEST_PHASE_WHITE_DOWN,
         TEST_PHASE_BLACK_DOWN,
         TEST_PHASE_WHITE_RIGHT,
-        TEST_PHASE_BLACK_RIGHT
+        TEST_PHASE_BLACK_RIGHT,
+        TEST_PHASE_SNAKE,
+        TEST_PHASE_MUSIC
     };
 
     touchgfx::Unicode::UnicodeChar paramLineBuffer[PARAM_LINE_SIZE];

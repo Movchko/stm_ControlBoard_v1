@@ -126,7 +126,8 @@ static uint16_t s_menu_selected;
 static uint8_t s_menu_n_items;
 static uint8_t s_menu_indication_test_req;
 static uint8_t s_menu_fire_mode;
-static uint8_t s_menu_sound_on;
+/* По умолчанию звук Вкл — как beep_sound / PanelHostCache.beep при старте. */
+static uint8_t s_menu_sound_on = 1u;
 static uint8_t s_menu_sound_blocked;
 static MenuCfgState s_cfg_state = MENU_CFG_STATE_IDLE;
 static uint8_t s_cfg_percent;
@@ -295,7 +296,7 @@ void PPKY_ZoneFireModeSet(uint8_t zone_idx, uint8_t mode)
 	if (zone_idx >= 32) {
 		return;
 	}
-	PanelHostCache_Get()->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
+	PanelHostCache_Get()->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x07u);
 }
 
 uint8_t PPKY_ZoneEffectiveMode(uint8_t zone_can)
@@ -310,7 +311,13 @@ uint8_t PPKY_ZoneEffectiveMode(uint8_t zone_can)
 
 uint8_t PPKY_ZoneLaunchBlockedByCanZone(uint8_t zone_can)
 {
-	return (PPKY_ZoneEffectiveMode(zone_can) == 3u) ? 1u : 0u;
+	const uint8_t m = PPKY_ZoneEffectiveMode(zone_can);
+	return (m == 3u || m == 4u) ? 1u : 0u;
+}
+
+uint8_t PPKY_ZoneFireBlockedByCanZone(uint8_t zone_can)
+{
+	return (PPKY_ZoneEffectiveMode(zone_can) == 4u) ? 1u : 0u;
 }
 
 uint8_t PPKY_ZoneIsManualByCanZone(uint8_t zone_can)
@@ -323,7 +330,7 @@ uint8_t PPKY_AnyZoneManualOrBlocked(void)
 	const PanelHostCache *host = PanelHostCache_GetConst();
 	for (uint8_t i = 0u; i < 32; i++) {
 		const uint8_t m = host->zone_fire_mode[i];
-		if (m == 2u || m == 3u) {
+		if (m == 2u || m == 3u || m == 4u) {
 			return 1u;
 		}
 	}
@@ -720,7 +727,7 @@ void PanelZoneModeCache_SetList(uint8_t selected_zone_idx,
             name_len = ZONE_NAME_SIZE;
         }
         memcpy(host->zone_name[zone_idx], &items[pos], name_len);
-        host->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x03u);
+        host->zone_fire_mode[zone_idx] = (uint8_t)(mode & 0x07u);
         pos = (uint16_t)(pos + src_name_len);
     }
 

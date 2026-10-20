@@ -34,7 +34,9 @@ protected:
         TEST_PHASE_WHITE_DOWN,
         TEST_PHASE_BLACK_DOWN,
         TEST_PHASE_WHITE_RIGHT,
-        TEST_PHASE_BLACK_RIGHT
+        TEST_PHASE_BLACK_RIGHT,
+        TEST_PHASE_SNAKE,
+        TEST_PHASE_MUSIC
     };
 
     void stopIndicationTestUi();

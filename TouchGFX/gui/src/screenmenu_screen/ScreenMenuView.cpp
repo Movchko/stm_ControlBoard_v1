@@ -66,6 +66,10 @@ void ScreenMenuView::initParamLineText()
 
 void ScreenMenuView::stopIndicationTestUi()
 {
+    if (test_phase_ == TEST_PHASE_SNAKE || test_phase_ == TEST_PHASE_MUSIC) {
+        Beeper_StopIndicationTest();
+        Led_StopIndicationSnakeLoop();
+    }
     test_phase_ = TEST_PHASE_IDLE;
     test_progress_ = 0;
     box1_white.setVisible(false);
@@ -119,6 +123,21 @@ void ScreenMenuView::advanceIndicationTest()
         return;
     }
 
+    if (test_phase_ == TEST_PHASE_SNAKE) {
+        if (Led_IsIndicationSnakeLoopActive() == 0u) {
+            Beeper_PlayIndicationTest();
+            test_phase_ = TEST_PHASE_MUSIC;
+        }
+        return;
+    }
+
+    if (test_phase_ == TEST_PHASE_MUSIC) {
+        if (Beeper_IsIndicationTestPlaying() == 0u) {
+            test_phase_ = TEST_PHASE_IDLE;
+        }
+        return;
+    }
+
     const int16_t limit = (test_phase_ == TEST_PHASE_WHITE_DOWN ||
                            test_phase_ == TEST_PHASE_BLACK_DOWN)
                               ? TEST_SCREEN_H
@@ -151,10 +170,16 @@ void ScreenMenuView::advanceIndicationTest()
         applyWipeProgress();
         break;
     case TEST_PHASE_BLACK_RIGHT:
+        box1_white.setVisible(false);
+        box1_black.setVisible(false);
+        box1_white.invalidate();
+        box1_black.invalidate();
+        test_progress_ = 0;
+        Led_StartIndicationSnakeLoop();
+        test_phase_ = TEST_PHASE_SNAKE;
+        break;
     default:
-        stopIndicationTestUi();
-        Beeper_PlayIndicationTest();
-        Led_RunIndicationSnake();
+        test_phase_ = TEST_PHASE_IDLE;
         break;
     }
 }

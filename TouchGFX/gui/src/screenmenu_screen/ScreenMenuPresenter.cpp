@@ -1,6 +1,7 @@
 #include <gui/screenmenu_screen/ScreenMenuView.hpp>
 #include <gui/screenmenu_screen/ScreenMenuPresenter.hpp>
 #include "button.h"
+#include "beeper.h"
 #include "gost_mode.h"
 #include "menu_ui.h"
 #include "rs_panel_protocol.h"
@@ -23,7 +24,10 @@ void ScreenMenuPresenter::activate()
 #ifndef SIMULATOR
     MenuUi_SetMainScreenActive(0u);
     MenuUi_SetMenuSessionScreen(RS_PANEL_SCREEN_MENU_ROOT);
-    soundOn = (MenuUi_GetSoundValue() != 0u);
+    /* Фактический mute бипера — иначе меню «Откл» при слышных кликах. */
+    soundOn = (Beeper_IsSoundOn() != 0u);
+    PanelHostCache_Get()->beep = soundOn ? 1u : 0u;
+    MenuUi_SetSoundValue(soundOn ? 1u : 0u, PanelHostCache_GetConst()->beep_block);
     currentIndex = (int16_t)MenuUi_GetMenuSelected();
     if (currentIndex >= MENU_ITEMS) {
         currentIndex = 0;
@@ -156,7 +160,11 @@ void ScreenMenuPresenter::onAppTick()
         view.startIndicationTest();
     }
 
-    soundOn = (MenuUi_GetSoundValue() != 0u);
+    soundOn = (Beeper_IsSoundOn() != 0u);
+    if ((MenuUi_GetSoundValue() != 0u) != soundOn) {
+        PanelHostCache_Get()->beep = soundOn ? 1u : 0u;
+        MenuUi_SetSoundValue(soundOn ? 1u : 0u, MenuUi_IsSoundBlocked());
+    }
 
     const uint16_t sel = MenuUi_GetMenuSelected();
     int16_t desired = (int16_t)sel;
@@ -180,7 +188,7 @@ void ScreenMenuPresenter::onSoundOnChanged(bool soundOnIn)
 {
 #ifndef SIMULATOR
     (void)soundOnIn;
-    soundOn = (MenuUi_GetSoundValue() != 0u);
+    soundOn = (Beeper_IsSoundOn() != 0u);
     refreshLine();
 #endif
 }

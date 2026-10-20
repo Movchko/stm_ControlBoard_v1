@@ -147,6 +147,7 @@ void screen_devicesView::nextDevice()
         return;
     }
     selectedIndex = (uint8_t)((selectedIndex + 1u) % deviceCount);
+    MenuUi_SetMcuDetailSlot(deviceSlots[selectedIndex]);
     renderSelected();
 }
 
@@ -156,6 +157,7 @@ void screen_devicesView::prevDevice()
         return;
     }
     selectedIndex = (uint8_t)((selectedIndex == 0u) ? (deviceCount - 1u) : (selectedIndex - 1u));
+    MenuUi_SetMcuDetailSlot(deviceSlots[selectedIndex]);
     renderSelected();
 }
 

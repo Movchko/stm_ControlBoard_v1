@@ -111,10 +111,14 @@ void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t
 void Beeper_ButtonAcknowledge(void);
 
 /**
- * @brief Тест звуковой индикации (меню ТЕСТ): блокирующая мелодия ~15 с.
+ * @brief ТЕСТ1: старт мелодии «Кукла колдуна» (неблокирующий, тик в Beeper_Process).
  * После завершения восстанавливает фоновый паттерн, если был.
  */
 void Beeper_PlayIndicationTest(void);
+/** 1 пока играет мелодия ТЕСТ1. */
+uint8_t Beeper_IsIndicationTestPlaying(void);
+/** Принудительный стоп мелодии ТЕСТ1 (уход с экрана и т.п.). */
+void Beeper_StopIndicationTest(void);
 
 /* ТЕСТ3: захват звука (хост / внутренняя логика не перебивают). */
 typedef enum {
@@ -138,15 +142,21 @@ uint8_t Beeper_IsTestPlaying(void);
 
 /**
  * @brief Функция установки параметра звука ВКЛ/ВЫКЛ
- * Параметр сохраняемый в настройках
+ * Параметр сохраняемый в настройках; синхронизирует PanelHostCache/MenuUi.
  */
 void Beeper_SoundOnOff(bool soundOn);
+/** Фактический mute бипера (1 = звук разрешён). */
+uint8_t Beeper_IsSoundOn(void);
 
 /**
  * @brief GOST: возобновить звук при новом извещении, если был вручную выключен.
  * Вне GOST_MODE — no-op.
+ * @return 1 если unmute выполнен сейчас.
  */
-void Beeper_ResumeSoundOnNewEvent(void);
+uint8_t Beeper_ResumeSoundOnNewEvent(void);
+/** 1 — локальный GOST-unmute ждёт SYS_SOUND_ON=1 (не глушить POLL'ом). */
+uint8_t Beeper_IsGostResumeHold(void);
+void Beeper_AckGostResumeFromHost(void);
 
 /**
  * @brief Колбэк синхронизации UI/конфига при автовозобновлении звука (из AppInit).

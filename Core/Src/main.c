@@ -166,7 +166,8 @@ int main(void)
 
   HAL_TIM_Base_Start_IT(&htim1);
   Beeper_HwStart();
-  Beeper_SoundOnOff(true);
+  /* Не форсировать SoundOnOff(true) здесь: Timer10ms уже может принять POLL
+   * с SYS_SOUND_ON=0; повторный true разъезжал бипер и меню («Откл» при кликах). */
   Beeper_StartupBeep();
 
   /* USER CODE END 2 */

@@ -42,6 +42,41 @@ static uint8_t s_led_test_mode = 0u;
 static uint8_t s_led_test_saved_state[NUM_LED];
 static uint8_t s_led_test_saved_power[NUM_LED];
 
+/* ТЕСТ1: зацикленная змейка (шаг в Led_Process).
+ * Раньше HAL_Delay(50) + I2C ≈ 80–100 мс на шаг; 10×10 мс ближе к тому темпу. */
+#define LED_SNAKE_STEP_TICKS 10u
+static const uint8_t s_snake_seq[] = {
+	LED_BUT_ENTER_UP, LED_FIRE, LED_BUT_ESC_DW, LED_AUTO_OFF, LED_POWER,
+	LED_NORM, LED_START, LED_STOP, LED_ERR, LED_BUT_START_ALL,
+	LED_STR_START_ALL, LED_STR_STOP, LED_BUT_STOP, LED_BUT_START_SP, LED_STR_START_SP
+};
+#define LED_SNAKE_LEN ((uint8_t)(sizeof(s_snake_seq) / sizeof(s_snake_seq[0])))
+static uint8_t s_snake_loop_active = 0u;
+static uint8_t s_snake_saved_state[NUM_LED];
+static uint8_t s_snake_saved_power[NUM_LED];
+static uint8_t s_snake_idx = 0u;
+static uint8_t s_snake_turn_on = 1u; /* 1 = фаза включения, 0 = выключения */
+static uint16_t s_snake_delay_ticks = 0u;
+
+/* ТЕСТ1/ТЕСТ2: блокировка штатных Led_Set / яркости с ППКУ. */
+static uint8_t Led_IsCaptureActive(void)
+{
+	return (s_led_test_mode != 0u || s_snake_loop_active != 0u) ? 1u : 0u;
+}
+
+/* Прямая установка канала внутри захвата (обходит Led_Set). */
+static void Led_CaptureSet(uint8_t led, uint8_t st)
+{
+	if (led >= NUM_LED) {
+		return;
+	}
+	st = (st != 0u) ? 1u : 0u;
+	cur_led_state[led] = st;
+	cur_led_power[led] = LED_BUT_MAX_BRIGHTNESS;
+	hw_led_state[led] = 0xFFu;
+	hw_led_power[led] = 0xFFu;
+}
+
 static void Led_UpdateStatusBrightness(void)
 {
 	for (uint8_t led = LED_STATUS_FIRST; led <= LED_STATUS_LAST; led++) {
@@ -202,7 +237,7 @@ void Led_Init() {
 }
 
 void Led_SetAll(uint8_t power) {
-	if (s_led_test_mode != 0u) {
+	if (Led_IsCaptureActive() != 0u) {
 		return;
 	}
 	for(uint8_t i = 0; i < NUM_LED; i++) {
@@ -212,7 +247,7 @@ void Led_SetAll(uint8_t power) {
 }
 
 void Led_OffAll() {
-	if (s_led_test_mode != 0u) {
+	if (Led_IsCaptureActive() != 0u) {
 		return;
 	}
 	for(uint8_t i = 0; i < NUM_LED; i++) {
@@ -222,7 +257,7 @@ void Led_OffAll() {
 
 
 void Led_Set(uint8_t led, uint8_t st) {
-	if (s_led_test_mode != 0u) {
+	if (Led_IsCaptureActive() != 0u) {
 		return;
 	}
 	if (led >= NUM_LED) {
@@ -304,25 +339,34 @@ uint8_t Led_TestGet(uint8_t led)
 	return (uint8_t)(cur_led_state[led] & 0x03u);
 }
 
+void Led_TestSetAll(uint8_t st)
+{
+	uint8_t i;
+
+	st = (st != 0u) ? 1u : 0u;
+	for (i = 0u; i < NUM_LED; i++) {
+		Led_TestSet(i, st);
+	}
+}
+
+uint8_t Led_TestAreAllOn(void)
+{
+	uint8_t i;
+
+	for (i = 0u; i < NUM_LED; i++) {
+		if (Led_TestGet(i) == 0u) {
+			return 0u;
+		}
+	}
+	return 1u;
+}
+
 void Led_Snake(uint8_t state) {
-	const uint8_t seq[] = {
-		LED_BUT_ENTER_UP, LED_FIRE, LED_BUT_ESC_DW, LED_AUTO_OFF, LED_POWER,
-		LED_NORM, LED_START, LED_STOP, LED_ERR, LED_BUT_START_ALL,
-		LED_STR_START_ALL, LED_STR_STOP, LED_BUT_STOP, LED_BUT_START_SP, LED_STR_START_SP
-	};
-	for (uint8_t i = 0u; i < (uint8_t)(sizeof(seq) / sizeof(seq[0])); i++) {
-		Led_Set(seq[i], state);
+	for (uint8_t i = 0u; i < LED_SNAKE_LEN; i++) {
+		Led_Set(s_snake_seq[i], state);
 		Led_SyncToI2C();
 		HAL_Delay(50);
 	}
-
-
-/*
-	for(uint8_t i = 0; i < NUM_LED; i++) {
-		LedSet(i, state);
-		HAL_Delay(delay);
-	}
-*/
 }
 
 void Led_RunIndicationSnake(void)
@@ -348,6 +392,83 @@ void Led_RunIndicationSnake(void)
 	Led_SyncToI2C();
 }
 
+void Led_StartIndicationSnakeLoop(void)
+{
+	uint8_t i;
+
+	if (s_snake_loop_active != 0u) {
+		return;
+	}
+	for (i = 0u; i < NUM_LED; i++) {
+		s_snake_saved_state[i] = cur_led_state[i];
+		s_snake_saved_power[i] = cur_led_power[i];
+		/* Гасим всё перед змейкой; штатная индикация блокируется через capture. */
+		cur_led_state[i] = LED_OFF;
+		cur_led_power[i] = LED_BUT_MAX_BRIGHTNESS;
+		hw_led_state[i] = 0xFFu;
+		hw_led_power[i] = 0xFFu;
+	}
+	s_snake_idx = 0u;
+	s_snake_turn_on = 1u;
+	s_snake_delay_ticks = 0u;
+	s_snake_loop_active = 1u;
+	led_but_is_bright = 1u;
+	led_but_idle_counter = 0u;
+	led_sync_tick = LED_I2C_SYNC_PERIOD_TICKS;
+	Led_SyncToI2C();
+}
+
+void Led_StopIndicationSnakeLoop(void)
+{
+	uint8_t i;
+
+	if (s_snake_loop_active == 0u) {
+		return;
+	}
+	s_snake_loop_active = 0u;
+	s_snake_delay_ticks = 0u;
+	for (i = 0u; i < NUM_LED; i++) {
+		cur_led_state[i] = s_snake_saved_state[i];
+		cur_led_power[i] = s_snake_saved_power[i];
+		hw_led_state[i] = 0xFFu;
+		hw_led_power[i] = 0xFFu;
+	}
+	Led_SyncToI2C();
+}
+
+uint8_t Led_IsIndicationSnakeLoopActive(void)
+{
+	return s_snake_loop_active;
+}
+
+static void Led_IndicationSnakeLoopProcess(void)
+{
+	if (s_snake_loop_active == 0u) {
+		return;
+	}
+	if (s_snake_delay_ticks > 0u) {
+		s_snake_delay_ticks--;
+		return;
+	}
+
+	Led_CaptureSet(s_snake_seq[s_snake_idx], s_snake_turn_on);
+	led_sync_tick = LED_I2C_SYNC_PERIOD_TICKS;
+	Led_SyncToI2C();
+	s_snake_idx++;
+	if (s_snake_idx >= LED_SNAKE_LEN) {
+		s_snake_idx = 0u;
+		if (s_snake_turn_on != 0u) {
+			/* Фаза вкл закончена → выкл. */
+			s_snake_turn_on = 0u;
+		} else {
+			/* Один цикл вкл→выкл завершён — восстановить штатную индикацию. */
+			Led_StopIndicationSnakeLoop();
+			return;
+		}
+	}
+	s_snake_delay_ticks = LED_SNAKE_STEP_TICKS;
+}
+
 void Led_TestToogle() {
 	for(uint8_t i = 2; i < (NUM_LED - 2); i++) {
 		if(cur_led_state[i]) {
@@ -370,8 +491,10 @@ void Led_Process() {
 	 *   снова небольшая яркость
 	 */
 
-	if (s_led_test_mode != 0u) {
-		/* ТЕСТ2: яркость всегда максимум, автозатухание выкл. */
+	Led_IndicationSnakeLoopProcess();
+
+	if (Led_IsCaptureActive() != 0u) {
+		/* ТЕСТ1/ТЕСТ2: яркость макс., штатная подсветка/затухание выкл. */
 		led_but_is_bright = 1u;
 		led_but_idle_counter = 0u;
 		for (uint8_t i = 0u; i < NUM_LED; i++) {
@@ -459,7 +582,7 @@ void Led_Process() {
 }
 
 void Led_SetBrightness(uint8_t led, uint8_t power) {
-	if (s_led_test_mode != 0u) {
+	if (Led_IsCaptureActive() != 0u) {
 		return;
 	}
 	if (led >= NUM_LED) {
@@ -470,7 +593,7 @@ void Led_SetBrightness(uint8_t led, uint8_t power) {
 
 void Led_ForceStatusBright(uint8_t led)
 {
-	if (s_led_test_mode != 0u) {
+	if (Led_IsCaptureActive() != 0u) {
 		return;
 	}
 	if (led < LED_STATUS_FIRST || led > LED_STATUS_LAST) {

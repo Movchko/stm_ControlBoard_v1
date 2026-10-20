@@ -53,8 +53,16 @@ void Led_Set(uint8_t led, uint8_t st);
 void Led_Snake(uint8_t state);
 /**
  * @brief Змейка индикации (вкл → выкл) с сохранением/восстановлением состояний LED.
+ * Блокирующая (HAL_Delay) — для отладки; в ТЕСТ1 используйте Loop.
  */
 void Led_RunIndicationSnake(void);
+/**
+ * @brief ТЕСТ1: один цикл змейки вкл→выкл (шаг в Led_Process), затем авто-Stop.
+ * Capture блокирует штатную индикацию; Stop восстанавливает снимок.
+ */
+void Led_StartIndicationSnakeLoop(void);
+void Led_StopIndicationSnakeLoop(void);
+uint8_t Led_IsIndicationSnakeLoopActive(void);
 void Led_TestToogle();
 void Led_Process();
 void Led_SetBrightness(uint8_t led, uint8_t power);
@@ -71,6 +79,10 @@ uint8_t Led_IsTestMode(void);
 /** Управление LED только из UI теста (обходит блокировку). */
 void Led_TestSet(uint8_t led, uint8_t st);
 uint8_t Led_TestGet(uint8_t led);
+/** ТЕСТ2: все каналы сразу (0/1). */
+void Led_TestSetAll(uint8_t st);
+/** 1 если все каналы включены. */
+uint8_t Led_TestAreAllOn(void);
 
 #ifdef __cplusplus
 }

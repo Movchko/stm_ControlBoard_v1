@@ -98,7 +98,7 @@ void mainmenu::updateConnectionText(int16_t value)
 
 	case 0:
 
-		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("WIFI"), textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
+		Unicode::fromUTF8(reinterpret_cast<const uint8_t*>("WI-FI"), textAreaMainMenuBuffer, TEXTAREAMAINMENU_SIZE);
 
 		break;
 
@@ -145,6 +145,7 @@ void mainmenu::updateTestSelectText(int16_t value)
 void mainmenu::updateTestLampText(int16_t value)
 {
 	static const char* const kNames[] = {
+		"ВСЁ",
 		"ПИТ",
 		"НОРМ",
 		"ПУСК",

@@ -14,11 +14,14 @@
 #include "panel_cfg.h"
 #include "panel_host_cache.h"
 #include "panel_catalog_cache.h"
+#include "config_zone_block.h"
 #include "fire.h"
 #include "rtc_cache.h"
 #include "main.h"
 #include <string.h>
 #include <stdio.h>
+
+extern void SaveConfig(void);
 
 #define RS_V3_HOLD_START_ALL_MS     3000u /* ПУСК ОБЩИЙ: отсчёт на экране */
 #define RS_V3_SP_ARM_MS             2000u /* ПУСК СП (малая): до появления таймера */
@@ -184,6 +187,7 @@ static void rs_v3_apply_zones(const RsPanelV3Zones *z);
 static uint8_t rs_v3_has_attention_faults(void);
 static void rs_v3_fault_beep(uint8_t attn, uint8_t signal);
 static void rs_v3_fault_sound_after_resync(void);
+static void rs_v3_sync_led_stop_status(void);
 static void rs_v3_sync_fire_indication(void);
 static void rs_v3_evt_flush_queue(void);
 static void rs_v3_evt_flush_crit(void);
@@ -869,6 +873,38 @@ static uint8_t rs_v3_zones_want_fire1(void)
     return any;
 }
 
+/* Статусная LED_STOP: пауза countdown / ПОЖАР·ОСТ.ПУСК / зона в ручном (mode=2). */
+static void rs_v3_sync_led_stop_status(void)
+{
+    uint8_t on = 0u;
+    uint8_t zi;
+    uint8_t i;
+
+    for (zi = 0u; zi < 32u; zi++) {
+        if (PanelHostCache_GetConst()->zone_name[zi][0] == 0) {
+            continue;
+        }
+        if (PPKY_ZoneFireModeGet(zi) == 2u) {
+            on = 1u;
+            break;
+        }
+    }
+    if (on == 0u && s_fire_active != 0u && s_zones_valid != 0u) {
+        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+            const uint8_t st = s_zones.items[i].status;
+            if (st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED) {
+                on = 1u;
+                break;
+            }
+        }
+    }
+    Led_Set(LED_STOP, on);
+    if (on != 0u) {
+        Led_ForceStatusBright(LED_STOP);
+    }
+}
+
 /* Как на ППКУ: ALERT → START(тушение) → DUTY(ТУШ.ВЫП); LED_START при тушении. */
 static void rs_v3_sync_fire_indication(void)
 {
@@ -897,6 +933,7 @@ static void rs_v3_sync_fire_indication(void)
             s_fire_snd_alert_fire1 = 0u;
             rs_v3_restore_fault_beep_if_needed();
         }
+        rs_v3_sync_led_stop_status();
         return;
     }
 
@@ -960,6 +997,7 @@ static void rs_v3_sync_fire_indication(void)
         Led_Set(LED_STR_START_SP, need_ctrl);
         Led_Set(LED_BUT_STOP, need_ctrl);
         Led_Set(LED_STR_STOP, need_ctrl);
+        rs_v3_sync_led_stop_status();
     }
 
     fire1 = rs_v3_zones_want_fire1();
@@ -1425,11 +1463,22 @@ static void rs_v3_format_fault_line(const RsPanelV3FaultEvtItem *fe,
         rs_v3_format_ppku_sn(fe, detail, detail_sz);
         break;
     case RS_PANEL_V3_FAULT_PPKU_POWER_IN1:
-    case RS_PANEL_V3_FAULT_PPKU_POWER_IN2:
-        (void)snprintf(title, title_sz, "ПИТАНИЕ %u",
-                       (unsigned)(fe->code - RS_PANEL_V3_FAULT_PPKU_POWER_IN1 + 1u));
+    case RS_PANEL_V3_FAULT_PPKU_POWER_IN2: {
+        /* extra: 1=ОБРЫВ, 2=НИЖЕ, 3=ВЫШЕ (как PPKU_INPUT_FAULT_* на ППКУ). */
+        const char *kind_txt = "ОБРЫВ";
+        if ((fe->flags & RS_PANEL_V3_FAULT_FLAG_HAS_EXTRA) != 0u) {
+            if (fe->extra == 2) {
+                kind_txt = "НИЖЕ";
+            } else if (fe->extra == 3) {
+                kind_txt = "ВЫШЕ";
+            }
+        }
+        (void)snprintf(title, title_sz, "ПИТ%u. %s",
+                       (unsigned)(fe->code - RS_PANEL_V3_FAULT_PPKU_POWER_IN1 + 1u),
+                       kind_txt);
         rs_v3_format_ppku_sn(fe, detail, detail_sz);
         break;
+    }
     case RS_PANEL_V3_FAULT_LINE_BREAK:
     case RS_PANEL_V3_FAULT_LINE_SHORT:
     case RS_PANEL_V3_FAULT_LINE_OTHER: {
@@ -2095,6 +2144,35 @@ static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
                    er->payload_len >= 1u) {
             PanelConnectionCache_SetRemoteStatus(EspManager_IsUserWifiOn(),
                                                  (er->payload[0] != 0u) ? 1u : 0u);
+        } else if (er->type == (uint8_t)RS_PANEL_V3_EVT_ZONE_BLOCK_LIST &&
+                   er->payload_len >= 1u) {
+            /* payload: n, [zone1based, mode]* — имена зон уже из ZONE_NAMES. */
+            const uint8_t n = er->payload[0];
+            uint8_t i;
+            PanelHostCache *host = PanelHostCache_Get();
+            for (i = 0u; i < n; i++) {
+                uint16_t off = (uint16_t)(1u + (uint16_t)i * 2u);
+                uint8_t zone1;
+                uint8_t mode;
+                if ((uint16_t)(off + 1u) >= er->payload_len) {
+                    break;
+                }
+                zone1 = er->payload[off];
+                mode = er->payload[off + 1u];
+                if (zone1 >= 1u && zone1 <= 32u) {
+                    host->zone_fire_mode[zone1 - 1u] = (uint8_t)(mode & 0x07u);
+                }
+            }
+            rs_v3_sync_led_stop_status();
+        } else if (er->type == (uint8_t)RS_PANEL_V3_EVT_ZONE_BLOCK_SET &&
+                   er->payload_len >= 2u) {
+            uint8_t zone1 = er->payload[0];
+            uint8_t mode = er->payload[1];
+            if (zone1 >= 1u && zone1 <= 32u) {
+                PanelHostCache_Get()->zone_fire_mode[zone1 - 1u] =
+                    (uint8_t)(mode & 0x07u);
+            }
+            rs_v3_sync_led_stop_status();
         }
         /* Prefetch журнала — только ordinary idle; critical может быть занят. */
         if (s_fire_active == 0u &&
@@ -2568,10 +2646,30 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
             (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_SOUND_SET, 0u, on, 0u, 0u);
         } else if (screen == RS_PANEL_SCREEN_MENU_BLOCK_ZONE &&
                    ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_CONFIRM) {
+            /* Цикл режима здесь (не в TouchGFX): иначе Drain до presenter шлёт старый mode. */
             uint8_t zi = MenuUi_GetBlockZoneSelected();
             uint8_t zone = (uint8_t)(zi + 1u);
-            uint8_t blocked = 1u;
-            (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_ZONE_BLOCK_SET, zone, blocked, 0u, 0u);
+            uint8_t mode;
+            if (s_fire_active != 0u || zi >= 32u) {
+                continue;
+            }
+            mode = PPKY_ZoneFireModeGet(zi);
+            /* 0 → 2 → 3 → 4 → 0 */
+            if (mode == 0u) {
+                mode = 2u;
+            } else if (mode == 2u) {
+                mode = 3u;
+            } else if (mode == 3u) {
+                mode = 4u;
+            } else {
+                mode = 0u;
+            }
+            PPKY_ZoneFireModeSet(zi, mode);
+            PPKY_ZoneModeUiNotify(zi);
+            SaveConfig();
+            rs_v3_sync_led_stop_status();
+            (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_ZONE_BLOCK_SET, zone, mode,
+                                           0u, 0u);
         } else if (screen == RS_PANEL_SCREEN_MENU_DEVICES &&
                    ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_CONFIRM) {
             (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_DEVICES_GET, 0u, 0u,
@@ -2660,8 +2758,8 @@ static void rs_v3_sync_status_leds(void)
         if (s_fire_snd_phase == RS_V3_FIRE_SND_IDLE) {
             Led_Set(LED_START, 0u);
         }
-        Led_Set(LED_STOP, 0u);
     }
+    rs_v3_sync_led_stop_status();
 
     if (faults != 0u) {
         Led_Set(LED_ERR, 1u);

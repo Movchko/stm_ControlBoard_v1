@@ -15,6 +15,10 @@
 #define SOUND_DAC_LEVEL_ON                     SOUND_DAC_LEVEL_MAX
 
 /* Ноты около резонанса пищалки */
+#define NOTE_E5                                 659u
+#define NOTE_GS5                                831u
+#define NOTE_A5                                 880u
+#define NOTE_B5                                 988u
 #define NOTE_C6                                1047u
 #define NOTE_D6                                1175u
 #define NOTE_E6                                1319u
@@ -26,20 +30,38 @@
 #define NOTE_C7                                2093u
 #define NOTE_D7                                2349u
 #define NOTE_E7                                2637u
+#define NOTE_F7                                2794u
+#define NOTE_G7                                3136u
 
 #define SOUND_BUTTON_NOTE_HZ                   NOTE_A6
-#define SOUND_STARTUP_BEEP_MS                  1400u
+/* Старт: Windows «USB/Hardware Insert» — исходные длительности нот (~0.45 с) */
+#define SOUND_STARTUP_BEEP_MS                   455u
 
 /*
- * Прыжок (кнопка): восходящий свип, не мелодия Nintendo.
- * Диапазон около резонанса KPEG116 (~2 kHz), иначе низ не слышно.
+ * ТЕСТ1: «Кукла колдуна» (КиШ). Темп ~145 BPM, восьмая ≈ 200 мс.
  */
+#define SOUND_KUKLA_EIGHTH_MS                  200u
+#define SOUND_KUKLA_GAP_MS                      25u  /* артикуляция; входит в восьмую */
+#define SOUND_KUKLA_ON_MS                      (SOUND_KUKLA_EIGHTH_MS - SOUND_KUKLA_GAP_MS)
+#define SOUND_KUKLA_HALF_MS                    (SOUND_KUKLA_EIGHTH_MS * 4u)
+#define SOUND_KUKLA_BAR_REST_MS                (SOUND_KUKLA_EIGHTH_MS * 2u)
+
+/* Кнопка: короткий «пип», −20 % к амплитуде синуса */
+#define SOUND_PIP_MS                            55u
+#define SOUND_PIP_VOLUME_PCT                    80u
+
+/* [LEGACY] Прыжок Mario (кнопка): восходящий свип — не используется, для отката. */
 #define SOUND_JUMP_START_HZ                    NOTE_D6
 #define SOUND_JUMP_END_HZ                      NOTE_D7
 #define SOUND_JUMP_MS                          170u
 
+/* [LEGACY] Лазер «пиу» — не используется, для отката. */
+#define SOUND_LASER_START_HZ                   NOTE_G7
+#define SOUND_LASER_END_HZ                     NOTE_G6
+#define SOUND_LASER_MS                          90u
+
 /* Базовые one-shot сигналы */
-#define SOUND_BUTTON_ACK_ON_MS                 SOUND_JUMP_MS
+#define SOUND_BUTTON_ACK_ON_MS                 SOUND_PIP_MS
 #define SOUND_ONE_SHOT_LONG_ON_MS             1300u
 #define SOUND_ONE_SHOT_PAUSE_MS                200u
 
@@ -87,10 +109,5 @@
 #define SOUND_TEST_ON_MS                       300u
 #define SOUND_TEST_OFF_MS                      100u
 #define SOUND_TEST_PULSES                        3u
-/* ТЕСТ: фольклорное танго в стиле «Мурки», восьмая = 170 мс, два куплета > 10 с */
-#define SOUND_TEST_EIGHTH_MS                   170u
-#define SOUND_TEST_QUARTER_MS                  (SOUND_TEST_EIGHTH_MS * 2u)
-#define SOUND_TEST_DOTTED_MS                   (SOUND_TEST_EIGHTH_MS * 3u)
-#define SOUND_TEST_HALF_MS                     (SOUND_TEST_EIGHTH_MS * 4u)
 
 #endif /* INC_SOUND_PROFILES_H_ */

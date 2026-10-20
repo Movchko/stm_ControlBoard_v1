@@ -25,6 +25,7 @@
 /* USER CODE BEGIN TouchGFXHAL.cpp */
 #include "Display/display.h"
 #include "beeper.h"
+#include "menu_ui.h"
 #include "panel_host_cache.h"
 #include <gui/common/FrontendHeap.hpp>
 #include <touchgfx/hal/OSWrappers.hpp>
@@ -37,6 +38,7 @@ extern "C" void PanelApp_WireTouchGfx(void)
 		FrontendHeap::getInstance().model.setSoundOn(soundOn);
 	});
 	PanelHostCache_Get()->beep = 1u;
+	MenuUi_SetSoundValue(1u, 0u);
 	Beeper_SoundOnOff(true);
 	FrontendHeap::getInstance().model.setSoundOn(true);
 }

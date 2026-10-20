@@ -77,6 +77,7 @@ static BeeperResumeCtx_t g_resume_ctx = {0};
 static uint16_t s_current_note_hz = 0u;
 
 static volatile uint8_t s_tone_running = 0u;
+static volatile uint8_t s_tone_volume_pct = 100u; /* 100 = полная амплитуда синуса */
 static volatile uint32_t s_phase = 0u;
 static volatile uint32_t s_phase_inc = 0u;
 static volatile uint32_t s_sweep_inc_step = 0u;
@@ -94,6 +95,8 @@ static uint16_t s_beeper_test_stop_ticks = 0u;
 static uint8_t s_beeper_test_bursts_left = 0u;
 /* Временный звук при mute (клик кнопки / тест индикации). */
 static uint8_t s_sound_override = 0u;
+/* GOST: unmute по новому событию — не дать POLL с SOUND_ON=0 сразу заглушить. */
+static uint8_t s_gost_resume_hold = 0u;
 
 static uint8_t Beeper_TestModeBlocksExternal(void)
 {
@@ -297,6 +300,7 @@ void Beeper_HwStart(void)
 static void Beeper_ToneStop(void)
 {
 	s_tone_running = 0u;
+	s_tone_volume_pct = 100u;
 	s_phase = 0u;
 	s_sweep_inc_step = 0u;
 	s_sweep_samples_left = 0u;
@@ -330,6 +334,7 @@ static void Beeper_EnsureIdle(void)
 void Beeper_OnTim6Tick(void)
 {
 	uint32_t idx;
+	uint16_t sample;
 
 	if (s_tone_running == 0u) {
 		return;
@@ -342,7 +347,13 @@ void Beeper_OnTim6Tick(void)
 
 	s_phase += s_phase_inc;
 	idx = s_phase >> 26; /* старшие 6 бит → 64 точки */
-	Beeper_DacWrite(s_sine[idx]);
+	sample = s_sine[idx];
+	if (s_tone_volume_pct < 100u) {
+		int32_t centered = (int32_t)sample - (int32_t)SOUND_DAC_LEVEL_MID;
+		centered = (centered * (int32_t)s_tone_volume_pct) / 100;
+		sample = (uint16_t)((int32_t)SOUND_DAC_LEVEL_MID + centered);
+	}
+	Beeper_DacWrite(sample);
 }
 
 static void Beeper_On(void)
@@ -355,15 +366,43 @@ static void Beeper_Off(void)
 	Beeper_ToneStop();
 }
 
-static void Beeper_StartJumpSweep(void)
+#if 0 /* LEGACY: частотные свипы (Mario jump / лазер «пиу») — не удалять */
+/* Общий частотный свип start→end за duration_ms (DAC TIM6).
+ * Нисходящий: s_sweep_inc_step = −Δ в uint32 (wrap в OnTim6Tick). */
+static void Beeper_StartFreqSweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration_ms)
 {
-	const uint32_t samples = (SOUND_DAC_SAMPLE_HZ * (uint32_t)SOUND_JUMP_MS) / 1000u;
-	const uint32_t inc0 = (uint32_t)(((uint64_t)SOUND_JUMP_START_HZ << 32) / SOUND_DAC_SAMPLE_HZ);
-	const uint32_t inc1 = (uint32_t)(((uint64_t)SOUND_JUMP_END_HZ << 32) / SOUND_DAC_SAMPLE_HZ);
+	const uint32_t samples = (SOUND_DAC_SAMPLE_HZ * (uint32_t)duration_ms) / 1000u;
+	const uint32_t inc0 = (uint32_t)(((uint64_t)start_hz << 32) / SOUND_DAC_SAMPLE_HZ);
+	const uint32_t inc1 = (uint32_t)(((uint64_t)end_hz << 32) / SOUND_DAC_SAMPLE_HZ);
 
 	s_phase_inc = inc0;
-	s_sweep_inc_step = (samples > 0u) ? ((inc1 - inc0) / samples) : 0u;
 	s_sweep_samples_left = samples;
+	if (samples == 0u) {
+		s_sweep_inc_step = 0u;
+	} else if (inc1 >= inc0) {
+		s_sweep_inc_step = (inc1 - inc0) / samples;
+	} else {
+		s_sweep_inc_step = (uint32_t)(0u - ((inc0 - inc1) / samples));
+	}
+	Beeper_On();
+}
+
+static void Beeper_StartJumpSweep(void)
+{
+	Beeper_StartFreqSweep(SOUND_JUMP_START_HZ, SOUND_JUMP_END_HZ, SOUND_JUMP_MS);
+}
+
+static void Beeper_StartLaserSweep(void)
+{
+	Beeper_StartFreqSweep(SOUND_LASER_START_HZ, SOUND_LASER_END_HZ, SOUND_LASER_MS);
+}
+#endif
+
+/* Короткий «пип» на фиксированной ноте (−20 % амплитуды). */
+static void Beeper_StartPip(void)
+{
+	Beeper_SetNoteHz(SOUND_BUTTON_NOTE_HZ);
+	s_tone_volume_pct = SOUND_PIP_VOLUME_PCT;
 	Beeper_On();
 }
 
@@ -388,29 +427,88 @@ typedef struct
 	uint16_t ms;
 } BeeperMelodyNote_t;
 
-/* Фольклорное танго в ля миноре, октава около резонанса KPEG116. */
-static const BeeperMelodyNote_t s_test_murka_chorus[] = {
-	{ NOTE_A6, SOUND_TEST_QUARTER_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_E7, SOUND_TEST_DOTTED_MS },
-	{ NOTE_E7, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS },
-	{ NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_QUARTER_MS },
-	{ NOTE_GS6, SOUND_TEST_QUARTER_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_DOTTED_MS },
-	{ NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS },
-	{ NOTE_A6, SOUND_TEST_QUARTER_MS }, { 0u, SOUND_TEST_EIGHTH_MS },
-	{ NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS },
-	{ NOTE_E7, SOUND_TEST_QUARTER_MS }, { NOTE_D7, SOUND_TEST_EIGHTH_MS }, { NOTE_C7, SOUND_TEST_EIGHTH_MS },
-	{ NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_QUARTER_MS },
-	{ NOTE_GS6, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_D7, SOUND_TEST_QUARTER_MS },
-	{ NOTE_C7, SOUND_TEST_EIGHTH_MS }, { NOTE_B6, SOUND_TEST_EIGHTH_MS }, { NOTE_A6, SOUND_TEST_HALF_MS },
-	{ 0u, SOUND_TEST_QUARTER_MS }
+static void Beeper_RestoreAfterOneShot(void);
+
+/* ТЕСТ1: неблокирующая мелодия (шаг в Beeper_Process). */
+static uint8_t s_ind_melody_active = 0u;
+static uint8_t s_ind_saved_mute = 1u;
+static const BeeperMelodyNote_t *s_ind_notes = 0;
+static uint16_t s_ind_count = 0u;
+static uint16_t s_ind_idx = 0u;
+static uint32_t s_ind_note_end_ms = 0u;
+
+/*
+ * ТЕСТ1 — «Кукла колдуна» (вступление/припев), тональность Am.
+ * Источник (Dm на 2-й струне, pereborom.ru):
+ *   6-5-5-3-3-6-5-3  3-5-6-11-10-10-6-6  11-10-5
+ * → Am: C B B A A C B A | A B C F E E C C | F E B(half)
+ */
+#define KUKLA_E(hz) { (hz), SOUND_KUKLA_ON_MS }, { 0u, SOUND_KUKLA_GAP_MS },
+
+static const BeeperMelodyNote_t s_test_kukla_chorus[] = {
+	/* такт 1 (Am) */
+	KUKLA_E(NOTE_C7) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_A6)
+	KUKLA_E(NOTE_A6) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_A6)
+	/* такт 2 (Dm): A B C F E E C C */
+	KUKLA_E(NOTE_A6) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_F7)
+	KUKLA_E(NOTE_E7) KUKLA_E(NOTE_E7) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_C7)
+	/* такт 3 (E): F E + B половинная */
+	KUKLA_E(NOTE_F7) KUKLA_E(NOTE_E7)
+	{ NOTE_B6, SOUND_KUKLA_HALF_MS },
+	{ 0u, SOUND_KUKLA_BAR_REST_MS },
+	/* повтор */
+	KUKLA_E(NOTE_C7) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_A6)
+	KUKLA_E(NOTE_A6) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_A6)
+	KUKLA_E(NOTE_A6) KUKLA_E(NOTE_B6) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_F7)
+	KUKLA_E(NOTE_E7) KUKLA_E(NOTE_E7) KUKLA_E(NOTE_C7) KUKLA_E(NOTE_C7)
+	KUKLA_E(NOTE_F7) KUKLA_E(NOTE_E7)
+	{ NOTE_B6, SOUND_KUKLA_HALF_MS }
 };
 
-static void Beeper_PlayMelody(const BeeperMelodyNote_t *notes, uint16_t count)
+static void Beeper_IndMelodyFinish(void)
 {
-	uint16_t i;
+	s_ind_melody_active = 0u;
+	s_ind_notes = 0;
+	s_ind_count = 0u;
+	s_ind_idx = 0u;
+	beep_sound = s_ind_saved_mute;
+	Beeper_ToneStop();
+	Beeper_RestoreAfterOneShot();
+}
 
-	for (i = 0u; i < count; i++) {
-		Beeper_PlayNoteMs(notes[i].hz, notes[i].ms);
+static void Beeper_IndMelodyStartCurrentNote(void)
+{
+	uint16_t hz;
+	uint16_t ms;
+
+	if (s_ind_idx >= s_ind_count) {
+		Beeper_IndMelodyFinish();
+		return;
 	}
+	hz = s_ind_notes[s_ind_idx].hz;
+	ms = s_ind_notes[s_ind_idx].ms;
+	if (ms == 0u) {
+		ms = 1u;
+	}
+	s_ind_note_end_ms = HAL_GetTick() + (uint32_t)ms;
+	if (hz == 0u) {
+		Beeper_ToneStop();
+	} else {
+		Beeper_SetNoteHz(hz);
+		Beeper_On();
+	}
+}
+
+static void Beeper_IndMelodyProcess(void)
+{
+	if (s_ind_melody_active == 0u) {
+		return;
+	}
+	if ((int32_t)(HAL_GetTick() - s_ind_note_end_ms) < 0) {
+		return;
+	}
+	s_ind_idx++;
+	Beeper_IndMelodyStartCurrentNote();
 }
 
 static uint8_t Beeper_IsOneShotState(BeeperState_t st)
@@ -506,6 +604,7 @@ void Beeper_Init(void)
 	beep_phase = 0;
 	s_ack_cooldown_ticks = 0u;
 	s_tone_running = 0u;
+	s_tone_volume_pct = 100u;
 	s_phase = 0u;
 	s_phase_inc = 0u;
 	s_sweep_inc_step = 0u;
@@ -524,8 +623,8 @@ void Beeper_ShortBeep(void)
 	beeper_state = BEEPER_STATE_SHORT_BEEP;
 	beeper_counter = BEEPER_SHORT_BEEP_DURATION;
 	beep_phase = 0;
-	Beeper_ArmOneShotMs(SOUND_JUMP_MS);
-	Beeper_StartJumpSweep();
+	Beeper_ArmOneShotMs(SOUND_PIP_MS);
+	Beeper_StartPip();
 }
 
 /**
@@ -645,6 +744,13 @@ void Beeper_AllOff(void)
 	if (Beeper_TestModeBlocksExternal() != 0u) {
 		return;
 	}
+	if (s_ind_melody_active != 0u) {
+		s_ind_melody_active = 0u;
+		s_ind_notes = 0;
+		s_ind_count = 0u;
+		s_ind_idx = 0u;
+		beep_sound = s_ind_saved_mute;
+	}
 	g_resume_ctx.valid = 0u;
 	beeper_state = BEEPER_STATE_IDLE;
 	pattern_repeat_ticks = 0u;
@@ -681,7 +787,14 @@ void Beeper_PlayOneShotMs(uint16_t duration_ms)
 
 void Beeper_StartupBeep(void)
 {
-	/* Оригинальный 8-bit фанфар (не мелодия Nintendo). */
+	/*
+	 * Старт: Windows «USB/Hardware Insert» — исходные длительности нот
+	 * (не ускорять; длиннее 2 с — только обрезать хвост, здесь хвоста нет).
+	 * override: POLL мог уже выставить mute до конца boot — стартовый звук всё равно нужен.
+	 */
+	const uint8_t saved_override = s_sound_override;
+	s_sound_override = 1u;
+#if 0 /* LEGACY: прежний 8-bit фанфар */
 	Beeper_PlayNoteMs(NOTE_E6, 75u);
 	Beeper_PlayNoteMs(NOTE_G6, 75u);
 	Beeper_PlayNoteMs(NOTE_C7, 150u);
@@ -693,7 +806,29 @@ void Beeper_StartupBeep(void)
 	Beeper_PlayNoteMs(0u, 60u);
 	Beeper_PlayNoteMs(NOTE_G6, 80u);
 	Beeper_PlayNoteMs(NOTE_C7, 260u);
+#endif
+#if 0 /* LEGACY: Windows XP Startup-подобное арпеджио */
+	Beeper_PlayNoteMs(NOTE_E5, 180u);
+	Beeper_PlayNoteMs(NOTE_GS5, 180u);
+	Beeper_PlayNoteMs(NOTE_B5, 180u);
+	Beeper_PlayNoteMs(NOTE_E6, 220u);
+	Beeper_PlayNoteMs(NOTE_GS6, 220u);
+	Beeper_PlayNoteMs(NOTE_B6, 260u);
+	Beeper_PlayNoteMs(NOTE_E7, 420u);
+	Beeper_PlayNoteMs(0u, 80u);
+	Beeper_PlayNoteMs(NOTE_B6, 200u);
+	Beeper_PlayNoteMs(NOTE_E7, 520u);
+	Beeper_PlayNoteMs(NOTE_GS6, 280u);
+	Beeper_PlayNoteMs(NOTE_E7, 600u);
+#endif
+	Beeper_PlayNoteMs(NOTE_A5, 90u);
+	Beeper_PlayNoteMs(0u, 35u);
+	Beeper_PlayNoteMs(NOTE_B5, 100u);
+	Beeper_PlayNoteMs(0u, 30u);
+	Beeper_PlayNoteMs(NOTE_C6, 200u);
+	Beeper_PlayNoteMs(0u, 500u);
 	Beeper_ToneStop();
+	s_sound_override = saved_override;
 }
 
 void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms)
@@ -727,6 +862,10 @@ void Beeper_ButtonAcknowledge(void)
 	if (Beeper_TestModeBlocksExternal() != 0u) {
 		return;
 	}
+	/* Mute: клики и дежурные молчат; unmute — только fire/fault (Resume). */
+	if (beep_sound == 0u) {
+		return;
+	}
 	if (s_ack_cooldown_ticks > 0u) {
 		return;
 	}
@@ -742,35 +881,47 @@ void Beeper_ButtonAcknowledge(void)
 	    g_resume_ctx.pulses_total == 1u) {
 		g_resume_ctx.valid = 0u;
 	}
-	/* Клик слышен даже при mute; mute не снимаем. */
-	s_sound_override = 1u;
 	beeper_state = BEEPER_STATE_LONG_BEEP;
-	beeper_counter = Beeper_MsToTicks(SOUND_JUMP_MS);
+	beeper_counter = Beeper_MsToTicks(SOUND_PIP_MS);
 	beep_phase = 0u;
-	Beeper_ArmOneShotMs(SOUND_JUMP_MS);
-	Beeper_StartJumpSweep();
+	Beeper_ArmOneShotMs(SOUND_PIP_MS);
+	/* LEGACY Mario jump: Beeper_StartJumpSweep(); */
+	/* LEGACY лазер «пиу»: Beeper_StartLaserSweep(); */
+	Beeper_StartPip();
 }
 
 void Beeper_PlayIndicationTest(void)
 {
-	const uint8_t saved_mute = beep_sound;
-	//uint8_t pass;
-
+	if (s_ind_melody_active != 0u) {
+		Beeper_StopIndicationTest();
+	}
 	if (!Beeper_IsOneShotState(beeper_state)) {
 		Beeper_CaptureResumeStateIfNeeded();
 	}
-	/* Тест всегда проигрывается: иначе нельзя проверить звуковой канал. */
+	/* Тест всегда слышен: иначе нельзя проверить звуковой канал. */
+	s_ind_saved_mute = beep_sound;
 	beep_sound = 1u;
 	beeper_state = BEEPER_STATE_IDLE;
-	Beeper_Off();
+	Beeper_ToneStop();
 
-	//for (pass = 0u; pass < 2u; pass++) {
-		Beeper_PlayMelody(s_test_murka_chorus,
-			(uint16_t)(sizeof(s_test_murka_chorus) / sizeof(s_test_murka_chorus[0])));
-	//}
+	s_ind_notes = s_test_kukla_chorus;
+	s_ind_count = (uint16_t)(sizeof(s_test_kukla_chorus) / sizeof(s_test_kukla_chorus[0]));
+	s_ind_idx = 0u;
+	s_ind_melody_active = 1u;
+	Beeper_IndMelodyStartCurrentNote();
+}
 
-	beep_sound = saved_mute;
-	Beeper_RestoreAfterOneShot();
+uint8_t Beeper_IsIndicationTestPlaying(void)
+{
+	return s_ind_melody_active;
+}
+
+void Beeper_StopIndicationTest(void)
+{
+	if (s_ind_melody_active == 0u) {
+		return;
+	}
+	Beeper_IndMelodyFinish();
 }
 
 void Beeper_EnterTestMode(void)
@@ -888,8 +1039,12 @@ void Beeper_Process(void)
 		}
 	}
 
+	Beeper_IndMelodyProcess();
+
 	if (s_beeper_test_mode == 0u &&
-	    MenuUi_IsConfigSessionActive() && !Beeper_IsOneShotState(beeper_state)) {
+	    MenuUi_IsConfigSessionActive() &&
+	    !Beeper_IsOneShotState(beeper_state) &&
+	    s_ind_melody_active == 0u) {
 		Beeper_Off();
 		return;
 	}
@@ -897,7 +1052,9 @@ void Beeper_Process(void)
 	switch (beeper_state)
 	{
 		case BEEPER_STATE_IDLE:
-			Beeper_EnsureIdle();
+			if (s_ind_melody_active == 0u) {
+				Beeper_EnsureIdle();
+			}
 			break;
 
 		case BEEPER_STATE_SHORT_BEEP:
@@ -1023,17 +1180,41 @@ void Beeper_SoundOnOff(bool soundOn) {
 	}
 	const uint8_t next = soundOn ? 1u : 0u;
 	const uint8_t prev = beep_sound;
+	PanelHostCache *host = PanelHostCache_Get();
+
 	beep_sound = next;
 	if (!soundOn) {
+		s_gost_resume_hold = 0u; /* ручной mute снимает GOST-hold */
 		s_sound_override = 0u;
 		s_ack_cooldown_ticks = 0u;
 		g_resume_ctx.valid = 0u;
 		beeper_state = BEEPER_STATE_IDLE;
 		Beeper_Off();
 	}
+	/* Кэш/меню всегда = фактический mute (иначе POLL «выкл» + Beeper_SoundOnOff(true)
+	 * из main оставляют клики слышными при «Откл» в меню). */
+	if (host != 0) {
+		host->beep = next;
+		MenuUi_SetSoundValue(next, host->beep_block);
+	}
 	if (prev != next && g_sound_state_ui_cb != 0) {
 		g_sound_state_ui_cb(soundOn);
 	}
+}
+
+uint8_t Beeper_IsSoundOn(void)
+{
+	return (beep_sound != 0u) ? 1u : 0u;
+}
+
+uint8_t Beeper_IsGostResumeHold(void)
+{
+	return s_gost_resume_hold;
+}
+
+void Beeper_AckGostResumeFromHost(void)
+{
+	s_gost_resume_hold = 0u;
 }
 
 void Beeper_SetSoundStateUiCallback(Beeper_SoundStateUiCallback cb)
@@ -1041,26 +1222,24 @@ void Beeper_SetSoundStateUiCallback(Beeper_SoundStateUiCallback cb)
 	g_sound_state_ui_cb = cb;
 }
 
-void Beeper_ResumeSoundOnNewEvent(void)
+uint8_t Beeper_ResumeSoundOnNewEvent(void)
 {
 #if GOST_MODE
 	PanelHostCache *host = PanelHostCache_Get();
 
 	/* ГОСТ 7.6.1.13: после ручного отключения звука новое извещение снова включает звук. */
 	if (beep_sound != 0u) {
-		return;
+		return 0u;
 	}
-	if (host->beep_block != 0u) {
-		return;
+	if (host == 0 || host->beep_block != 0u) {
+		return 0u;
 	}
-	beep_sound = 1u;
-	host->beep = 1u;
-	MenuUi_SetSoundValue(1u, host->beep_block);
-	if (g_sound_state_ui_cb != 0) {
-		g_sound_state_ui_cb(true);
-	}
+	s_gost_resume_hold = 1u; /* до SYS_SOUND_ON=1 не принимать mute из POLL */
+	Beeper_SoundOnOff(true);
 	EventLog_LogSoundToggle(1u, 1u); /* source: auto (новое событие) */
+	return 1u;
 #else
 	/* Вне режима сдачи по ГОСТ mute остаётся до ручного включения. */
+	return 0u;
 #endif
 }
