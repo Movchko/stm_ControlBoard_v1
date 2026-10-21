@@ -45,8 +45,10 @@ _Min_Stack_Size = 0x1000; /* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 272K
-  /* App FLASH: −16K под FLASH_CATALOG (sector30) + FLASH_CFG (sector31). */
-  FLASH    (rx)    : ORIGIN = 0x08000000,/*0x0800E000,*/   LENGTH = 512k -16k
+  /* 512K целиком, см. boot_panel.h:
+   * boot 40K @ 0x08000000, footer sector @ 0x0800A000,
+   * app 448K @ 0x0800C000, catalog+cfg — два последних сектора. */
+  FLASH    (rx)    : ORIGIN = 0x0800C000,   LENGTH = 56*8K /* 448K */
   FLASH_CATALOG (r): ORIGIN = 0x0807C000,   LENGTH = 8K
   FLASH_CFG (r)    : ORIGIN = 0x0807E000,   LENGTH = 8K
 }

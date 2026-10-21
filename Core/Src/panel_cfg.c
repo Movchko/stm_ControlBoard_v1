@@ -9,7 +9,7 @@
 
 #define PANEL_CFG_HEADER_SIZE 8u
 #define QUADWORD_SIZE         16u
-#define FLASH_CFG_SECTOR      31u
+#define FLASH_CFG_SECTOR      PANEL_FLASH_CFG_SECTOR
 
 DevicePanelConfig g_panel_cfg;
 

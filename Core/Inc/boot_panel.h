@@ -11,7 +11,13 @@ extern "C" {
 /* Контракт flash/backup между бутлоадером v2 и приложением панели.
  * Дублируется в MCU_bootloader_v2/Core/Inc/boot_panel.h — держать синхронно.
  *
- * Boot: 40 КБ (сектора 0..4), код линкуется в LENGTH=40K-16; последние 16 байт — boot WD.
+ * 512 КБ = 64 сектора по 8 КБ, без промежутков:
+ *   0x08000000  40 КБ  сектора  0..4   бутлоадер (линкер LENGTH=40K-16; последние 16 байт — boot WD)
+ *   0x0800A000   8 КБ  сектор   5      футер образа (app WD + footer в конце сектора)
+ *   0x0800C000 448 КБ  сектора  6..61  приложение
+ *   0x0807C000   8 КБ  сектор  62      каталог (bank2 sector 30)
+ *   0x0807E000   8 КБ  сектор  63      конфиг панели (bank2 sector 31)
+ *
  * App WD: 16 байт сразу перед футером (тот же сектор, что футер) — стирается вместе с образом.
  *
  * Handoff app→boot: TAMP_BKP0..2 (backup domain). Не использовать конец SRAM:
@@ -19,15 +25,21 @@ extern "C" {
  * плюс OPTSR2.SRAM1_3_RST может стереть SRAM1/3 при SystemReset.
  */
 #define PANEL_FLASH_BASE            0x08000000u
-#define PANEL_BOOTLOADER_SIZE       0xA000u          /* 40 КБ, сектора 0..4 */
-#define PANEL_FOOTER_SECTOR_ADDR    0x0800C000u      /* сектор 6 */
-#define PANEL_APP_START_ADDR        0x0800E000u      /* сектор 7 */
-#define PANEL_APP_SIZE_SECTORS      28u
-#define PANEL_APP_SIZE_BYTES        (PANEL_APP_SIZE_SECTORS * 8u * 1024u)
-#define PANEL_FLASH_CATALOG_ADDR    0x0807C000u /* sector 30 Bank2 — v3 zone/MCU catalog */
-#define PANEL_FLASH_CATALOG_SIZE    0x2000u
-#define PANEL_FLASH_CFG_ADDR        0x0807E000u
+#define PANEL_FLASH_TOTAL           0x00080000u
+#define PANEL_FLASH_SECTOR_SIZE     0x2000u
+#define PANEL_BOOTLOADER_SIZE       0xA000u /* 40 КБ, сектора 0..4 */
+#define PANEL_FOOTER_SECTOR_ADDR    (PANEL_FLASH_BASE + PANEL_BOOTLOADER_SIZE) /* 0x0800A000 */
+#define PANEL_APP_START_ADDR        (PANEL_FOOTER_SECTOR_ADDR + PANEL_FLASH_SECTOR_SIZE) /* 0x0800C000 */
 #define PANEL_FLASH_CFG_SIZE        0x2000u
+#define PANEL_FLASH_CATALOG_SIZE    0x2000u
+#define PANEL_FLASH_CFG_ADDR        (PANEL_FLASH_BASE + PANEL_FLASH_TOTAL - PANEL_FLASH_CFG_SIZE) /* 0x0807E000 */
+#define PANEL_FLASH_CATALOG_ADDR    (PANEL_FLASH_CFG_ADDR - PANEL_FLASH_CATALOG_SIZE) /* 0x0807C000 */
+#define PANEL_APP_SIZE_BYTES        (PANEL_FLASH_CATALOG_ADDR - PANEL_APP_START_ADDR) /* 448 КБ */
+#define PANEL_APP_SIZE_SECTORS      (PANEL_APP_SIZE_BYTES / PANEL_FLASH_SECTOR_SIZE) /* 56 */
+#define PANEL_FLASH_BANK2_BASE      (PANEL_FLASH_BASE + (PANEL_FLASH_TOTAL / 2u)) /* 0x08040000 */
+#define PANEL_FLASH_CATALOG_SECTOR  ((PANEL_FLASH_CATALOG_ADDR - PANEL_FLASH_BANK2_BASE) / PANEL_FLASH_SECTOR_SIZE)
+#define PANEL_FLASH_CFG_SECTOR      ((PANEL_FLASH_CFG_ADDR - PANEL_FLASH_BANK2_BASE) / PANEL_FLASH_SECTOR_SIZE)
+#define PANEL_FOOTER_SECTOR_INDEX   ((PANEL_FOOTER_SECTOR_ADDR - PANEL_FLASH_BASE) / PANEL_FLASH_SECTOR_SIZE)
 #define PANEL_FLASH_FOOTER_SZ       64u
 #define PANEL_APP_FOOTER_ADDR       (PANEL_APP_START_ADDR - PANEL_FLASH_FOOTER_SZ)
 
@@ -35,6 +47,34 @@ extern "C" {
 #define PANEL_BOOT_KEY_ADDR         (PANEL_FLASH_BASE + PANEL_BOOTLOADER_SIZE - 16u)
 /* App WD: перед футером, в секторе футера/образа (EraseApp стирает). */
 #define PANEL_APP_WD_ADDR           (PANEL_APP_FOOTER_ADDR - 16u)
+
+#ifdef __cplusplus
+static_assert(PANEL_BOOTLOADER_SIZE + PANEL_FLASH_SECTOR_SIZE + PANEL_APP_SIZE_BYTES
+	+ PANEL_FLASH_CATALOG_SIZE + PANEL_FLASH_CFG_SIZE == PANEL_FLASH_TOTAL,
+	"panel flash map must cover 512K");
+static_assert(PANEL_APP_START_ADDR == 0x0800C000u, "app starts after footer sector");
+static_assert(PANEL_FLASH_CATALOG_ADDR == 0x0807C000u, "catalog is the penultimate sector");
+static_assert(PANEL_FLASH_CFG_ADDR == 0x0807E000u, "cfg is the last sector");
+static_assert(PANEL_APP_SIZE_SECTORS == 56u, "app is 56 sectors");
+static_assert(PANEL_FLASH_CATALOG_SECTOR == 30u, "catalog bank2 sector");
+static_assert(PANEL_FLASH_CFG_SECTOR == 31u, "cfg bank2 sector");
+static_assert(PANEL_FOOTER_SECTOR_INDEX == 5u, "footer sector follows bootloader");
+static_assert(PANEL_APP_WD_ADDR >= PANEL_FOOTER_SECTOR_ADDR, "app WD stays in footer sector");
+static_assert(PANEL_APP_FOOTER_ADDR + PANEL_FLASH_FOOTER_SZ == PANEL_APP_START_ADDR, "footer ends at app");
+#else
+_Static_assert(PANEL_BOOTLOADER_SIZE + PANEL_FLASH_SECTOR_SIZE + PANEL_APP_SIZE_BYTES
+	+ PANEL_FLASH_CATALOG_SIZE + PANEL_FLASH_CFG_SIZE == PANEL_FLASH_TOTAL,
+	"panel flash map must cover 512K");
+_Static_assert(PANEL_APP_START_ADDR == 0x0800C000u, "app starts after footer sector");
+_Static_assert(PANEL_FLASH_CATALOG_ADDR == 0x0807C000u, "catalog is the penultimate sector");
+_Static_assert(PANEL_FLASH_CFG_ADDR == 0x0807E000u, "cfg is the last sector");
+_Static_assert(PANEL_APP_SIZE_SECTORS == 56u, "app is 56 sectors");
+_Static_assert(PANEL_FLASH_CATALOG_SECTOR == 30u, "catalog bank2 sector");
+_Static_assert(PANEL_FLASH_CFG_SECTOR == 31u, "cfg bank2 sector");
+_Static_assert(PANEL_FOOTER_SECTOR_INDEX == 5u, "footer sector follows bootloader");
+_Static_assert(PANEL_APP_WD_ADDR >= PANEL_FOOTER_SECTOR_ADDR, "app WD stays in footer sector");
+_Static_assert(PANEL_APP_FOOTER_ADDR + PANEL_FLASH_FOOTER_SZ == PANEL_APP_START_ADDR, "footer ends at app");
+#endif
 
 #define PANEL_WATCHDOG_MAGIC        0xAABBCCDDu
 

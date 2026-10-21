@@ -14,7 +14,7 @@
 #include <stdio.h>
 
 /* fw_updater / stm_loader читают это имя из файла. */
-#define APP_VERSION_U32 6u
+#define APP_VERSION_U32 7u
 
 static volatile uint8_t g_enter_bootloader_pending = 0u;
 
@@ -48,7 +48,7 @@ void PanelUpd_Timer10ms(void)
 void App_WriteProgramWatchdog(void)
 {
 	//TODO delete return
-	return;
+	//return;
 
 	uint32_t *val = (uint32_t *)PANEL_APP_WD_ADDR;
 	uint32_t quad_word[4];

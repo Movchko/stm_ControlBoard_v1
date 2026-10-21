@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "boot_panel.h"
 #include "stm32h5xx_hal.h"
 #include "stm32h5xx_hal_flash.h"
 #include "stm32h5xx_hal_flash_ex.h"
@@ -9,7 +10,7 @@
 #define PANEL_CATALOG_HEADER_SIZE 8u
 #define PANEL_CATALOG_MAGIC       0x50434C47u /* 'PCLG' */
 #define QUADWORD_SIZE             16u
-#define FLASH_CATALOG_SECTOR      30u /* Bank2: 0x0807C000 */
+#define FLASH_CATALOG_SECTOR      PANEL_FLASH_CATALOG_SECTOR /* Bank2: 0x0807C000 */
 
 uint8_t PanelCatalog_FlashRead(PanelCatalogBlob *out)
 {
