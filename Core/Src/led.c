@@ -32,9 +32,12 @@ static uint8_t  led_but_is_bright = 0; /* 0 - базовая яркость, 1 -
 static uint8_t  led_status_prev_state[LED_STATUS_COUNT];
 static uint16_t led_status_idle_counter[LED_STATUS_COUNT];
 static uint8_t  led_status_is_dimmed[LED_STATUS_COUNT];
-/* Софт-мигание для logical state==2 (MODE_BLINK): период 2×400 мс при тике 10 мс. */
-#define LED_BLINK_HALF_TICKS 40u
-static uint16_t s_led_blink_tick = 0u;
+/* Софт-мигание для Led_Set(..., LED_BLINK): ПОЖАР1, 1,5 Гц.
+ * Три полупериода 333+334+333 мс = 1000 мс = 1,5 периода → ровно 1,5 Гц. */
+static const uint16_t s_led_blink_half_ms[3] = { 333u, 334u, 333u };
+static uint32_t s_led_blink_last_ms = 0u;
+static uint8_t  s_led_blink_step = 0u;
+static uint8_t  s_led_blink_active = 0u;
 static uint8_t  s_led_blink_on = 1u;
 
 /* ТЕСТ2: полный захват LED (ППКУ / внутренняя логика не перебивают). */
@@ -118,7 +121,7 @@ static uint8_t Led_PackGroupState(const uint8_t *state_arr, uint8_t group)
 		 * st==2 (логический BLINK) даёт (2<<1)=0b100 и затирает соседний канал
 		 * (LED_START blink → физически OFF + LED_STOP ON). В пакет — как ON/OFF
 		 * по фазе; мигание крутит Led_Process. */
-		if (st == 2u) {
+		if (st == LED_BLINK) {
 			st = (s_led_blink_on != 0u) ? 1u : 0u;
 		} else if (st > 1u) {
 			st = 1u;
@@ -147,7 +150,7 @@ static void Led_SyncToI2C(void)
 		uint8_t hw_val;
 		/* 0xFF в hw-кэше — «форс sync» после смены фазы BLINK.
 		 * Pack(0xFF&3→3→1) совпадает с фазой blink_on=1 → cur==hw и
-		 * I2C-запись пропускалась: LED_FIRE (MODE_BLINK/ПОЖАР2) оставался OFF. */
+		 * I2C-запись пропускалась: LED_FIRE (LED_BLINK/ПОЖАР1) оставался OFF. */
 		for (uint8_t i = 0u; i < 4u; i++) {
 			uint8_t idx = (uint8_t)(base + i);
 			if (idx < NUM_LED && hw_led_state[idx] == 0xFFu) {
@@ -540,33 +543,43 @@ void Led_Process() {
 	Led_UpdateStatusBrightness();
 	}
 
-	/* Logical BLINK (state==2): переключаем фазу и форсируем I2C sync. */
+	/* LED_BLINK: фаза 1,5 Гц и форс I2C sync на переключении. */
 	{
 		uint8_t any_blink = 0u;
 		uint8_t li;
 		for (li = 0u; li < NUM_LED; li++) {
-			if ((cur_led_state[li] & 0x03u) == 2u) {
+			if ((cur_led_state[li] & 0x03u) == LED_BLINK) {
 				any_blink = 1u;
 				break;
 			}
 		}
 		if (any_blink != 0u) {
-			if (s_led_blink_tick < LED_BLINK_HALF_TICKS) {
-				s_led_blink_tick++;
-			}
-			if (s_led_blink_tick >= LED_BLINK_HALF_TICKS) {
-				s_led_blink_tick = 0u;
+			const uint32_t now = HAL_GetTick();
+			if (s_led_blink_active == 0u) {
+				s_led_blink_active = 1u;
+				s_led_blink_last_ms = now;
+				s_led_blink_step = 0u;
+				s_led_blink_on = 1u;
+			} else if ((now - s_led_blink_last_ms) >=
+				   (uint32_t)s_led_blink_half_ms[s_led_blink_step]) {
+				const uint32_t half = (uint32_t)s_led_blink_half_ms[s_led_blink_step];
+				s_led_blink_last_ms += half;
+				if ((now - s_led_blink_last_ms) >= half) {
+					s_led_blink_last_ms = now;
+				}
 				s_led_blink_on = (uint8_t)!s_led_blink_on;
+				s_led_blink_step = (uint8_t)((s_led_blink_step + 1u) % 3u);
 				/* Сброс hw-кэша для blink-каналов — иначе Pack cur==hw и sync не уйдёт. */
 				for (li = 0u; li < NUM_LED; li++) {
-					if ((cur_led_state[li] & 0x03u) == 2u) {
+					if ((cur_led_state[li] & 0x03u) == LED_BLINK) {
 						hw_led_state[li] = 0xFFu;
 					}
 				}
 				led_sync_tick = LED_I2C_SYNC_PERIOD_TICKS;
 			}
 		} else {
-			s_led_blink_tick = 0u;
+			s_led_blink_active = 0u;
+			s_led_blink_step = 0u;
 			s_led_blink_on = 1u;
 		}
 	}

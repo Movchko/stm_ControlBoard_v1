@@ -142,8 +142,6 @@ static uint32_t s_fault_clear_safe_ms; /* старт debounce HAS_FAULTS=0 → w
 #define RS_V3_FIRE_SND_START  2u  /* тушение → паттерн ПУСК + LED_START */
 #define RS_V3_FIRE_SND_DUTY   3u  /* ТУШ.ВЫП / дежурный */
 static uint8_t s_fire_snd_phase;
-/* Внутри ALERT: 1 = ПОЖАР1 pulse, 0 = continuous (ПОЖАР2/countdown). */
-static uint8_t s_fire_snd_alert_fire1;
 
 /* Две независимые EVT-линии (NO preemption между ними).
  * Ordinary: s_event / s_evt_q — журнал/меню/wifi/звук.
@@ -259,7 +257,6 @@ void RsPanelV3Slave_Init(void)
     s_fault_pre_clear_count = 0u;
     s_fault_clear_safe_ms = 0u;
     s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
-    s_fire_snd_alert_fire1 = 0u;
     s_evt_q_n = 0u;
     memset(s_evt_q, 0, sizeof(s_evt_q));
     s_evt_q_crit_n = 0u;
@@ -748,6 +745,29 @@ static void rs_v3_restore_start_all_idle_leds(void)
     Led_Set(LED_STR_START_ALL, 1u);
 }
 
+/* После удержания ПУСК СП (малая): вернуть подсветку как в sync_fire_indication. */
+static void rs_v3_restore_start_sp_idle_leds(void)
+{
+    uint8_t need_ctrl = 0u;
+    uint8_t i;
+
+    if (s_fire_active != 0u && s_zones_valid != 0u) {
+        for (i = 0u; i < s_zones.count && i < RS_PANEL_V3_MAX_ZONES; i++) {
+            const uint8_t st = s_zones.items[i].status;
+            if (st == (uint8_t)RS_PANEL_V3_ZONE_COUNTDOWN ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_PAUSED ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_FIRE_STOPPED ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_EXT_ABORT ||
+                st == (uint8_t)RS_PANEL_V3_ZONE_FIRE1) {
+                need_ctrl = 1u;
+                break;
+            }
+        }
+    }
+    Led_Set(LED_BUT_START_SP, need_ctrl);
+    Led_Set(LED_STR_START_SP, need_ctrl);
+}
+
 /* Сброс локальных hold UI (ПУСК ОБЩИЙ / ПУСК СП) — после FIRE_RESET / ухода пожара. */
 static void rs_v3_cancel_local_holds(void)
 {
@@ -769,6 +789,7 @@ static void rs_v3_cancel_local_holds(void)
         s_hold_start_sp_cd = 0u;
         s_hold_start_sp_cd_ms = 0u;
         s_hold_start_sp_committed = 0u;
+        rs_v3_restore_start_sp_idle_leds();
     }
     if (had_hold != 0u) {
         rs_v3_restore_beep_after_hold_cancel();
@@ -869,7 +890,6 @@ static void rs_v3_on_fault_signal_done(void)
     if (rs_v3_fire_in_post_extinguish_duty() != 0u) {
         /* Переиграть DUTY пожара — StopPattern уже в Beeper_StartPulseTrain/конец SIGNAL. */
         s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
-        s_fire_snd_alert_fire1 = 0u;
         rs_v3_sync_fire_indication();
         return;
     }
@@ -905,7 +925,6 @@ static void rs_v3_restore_beep_after_hold_cancel(void)
     Beeper_StopPattern();
     if (s_fire_active != 0u) {
         s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
-        s_fire_snd_alert_fire1 = 0u;
         rs_v3_sync_fire_indication();
         return;
     }
@@ -913,12 +932,13 @@ static void rs_v3_restore_beep_after_hold_cancel(void)
 }
 
 /* Hold-писк в такт миганию (800/800). У Beeper repeat_ms — пауза ПОСЛЕ
- * пакета on+off; PERIOD сюда давать нельзя (получится 1 писк за 3.2 с). */
+ * пакета on+off; PERIOD сюда давать нельзя (получится 1 писк за 3.2 с).
+ * Играет и при mute (Beeper_StartHoldPulseTrain). */
 static void rs_v3_start_hold_beep(void)
 {
-    Beeper_StartPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
-                           SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
-                           1u, 10u);
+    Beeper_StartHoldPulseTrain(SOUND_START_ALL_HOLD_DUTY_MS,
+                               SOUND_START_ALL_HOLD_PERIOD_MS - SOUND_START_ALL_HOLD_DUTY_MS,
+                               1u, 10u);
 }
 
 /*
@@ -1035,7 +1055,9 @@ static void rs_v3_sync_fire_indication(void)
     uint8_t desired;
     uint8_t fire1;
 
-    if (s_hold_start_all != 0u && s_hold_start_all_committed == 0u) {
+    /* Не перебивать мигание ПУСК ОБЩИЙ / ПУСК СП на малой во время hold. */
+    if ((s_hold_start_all != 0u && s_hold_start_all_committed == 0u) ||
+        (s_hold_start_sp_cd != 0u && s_hold_start_sp_committed == 0u)) {
         return;
     }
 
@@ -1050,27 +1072,24 @@ static void rs_v3_sync_fire_indication(void)
             Led_Set(LED_BUT_STOP, 0u);
             Led_Set(LED_STR_STOP, 0u);
             s_fire_snd_phase = RS_V3_FIRE_SND_IDLE;
-            s_fire_snd_alert_fire1 = 0u;
             rs_v3_restore_fault_beep_if_needed();
         }
         rs_v3_sync_led_stop_status();
         return;
     }
 
-    /* Без ZONES: сразу ПОЖАР1 pulse (не continuous — иначе ложный FIRE2).
+    /* Без ZONES: тот же непрерывный тон, что и ПОЖАР2.
      * Раньше return → секунды тишины, пока ZONES режется ради ACK/стрима. */
     if (s_zones.count == 0u || s_zones_valid == 0u) {
-        if (s_fire_snd_phase != RS_V3_FIRE_SND_ALERT || s_fire_snd_alert_fire1 == 0u) {
+        if (s_fire_snd_phase != RS_V3_FIRE_SND_ALERT) {
             s_fault_sound_phase = RS_V3_FS_IDLE;
             s_fault_sound_deadline_ms = 0u;
             Beeper_ContinuousOff();
             Beeper_FireAlarmOff();
             Beeper_StopPattern();
             Beeper_ResumeSoundOnNewEvent();
-            Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
-                                   SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
+            Beeper_FireAlarmOn();
             s_fire_snd_phase = RS_V3_FIRE_SND_ALERT;
-            s_fire_snd_alert_fire1 = 1u;
             Led_Set(LED_START, 0u);
         }
         return;
@@ -1121,14 +1140,10 @@ static void rs_v3_sync_fire_indication(void)
     }
 
     fire1 = rs_v3_zones_want_fire1();
-    /* ALERT уже играет: но ПОЖАР1→countdown должен сменить pulse на continuous. */
+    /* ПОЖАР1 и ПОЖАР2 — один непрерывный ALERT: смену статуса не перезапускаем. */
     if (desired == s_fire_snd_phase) {
-        if (desired == RS_V3_FIRE_SND_ALERT && fire1 != s_fire_snd_alert_fire1) {
-            /* fall through — переиграть ALERT */
-        } else {
-            Led_Set(LED_START, (desired == RS_V3_FIRE_SND_START) ? 1u : 0u);
-            return;
-        }
+        Led_Set(LED_START, (desired == RS_V3_FIRE_SND_START) ? 1u : 0u);
+        return;
     }
 
     s_fault_sound_phase = RS_V3_FS_IDLE;
@@ -1139,17 +1154,9 @@ static void rs_v3_sync_fire_indication(void)
 
     if (desired == RS_V3_FIRE_SND_ALERT) {
         Beeper_ResumeSoundOnNewEvent();
-        if (fire1 != 0u) {
-            Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
-                                   SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
-            s_fire_snd_alert_fire1 = 1u;
-        } else {
-            Beeper_FireAlarmOn();
-            s_fire_snd_alert_fire1 = 0u;
-        }
+        Beeper_FireAlarmOn();
         Led_Set(LED_START, 0u);
     } else if (desired == RS_V3_FIRE_SND_START) {
-        s_fire_snd_alert_fire1 = 0u;
         Beeper_ResumeSoundOnNewEvent();
         Beeper_StartPulseTrain(BEEPER_PATTERN_START_ON_MS, BEEPER_PATTERN_START_OFF_MS,
                                BEEPER_PATTERN_START_PULSES, BEEPER_PATTERN_START_REPEAT_MS);
@@ -1157,7 +1164,6 @@ static void rs_v3_sync_fire_indication(void)
         Led_SetBrightness(LED_START, LED_STATUS_MAX_BRIGHTNESS);
         Led_ForceStatusBright(LED_START);
     } else {
-        s_fire_snd_alert_fire1 = 0u;
         /* DUTY: не Resume — иначе после ТУШ.ВЫП снова «орёт» unmute. */
         if (fire1 != 0u) {
             Beeper_StartPulseTrain(SOUND_FIRE1_DUTY_ON_MS, SOUND_FIRE1_DUTY_OFF_MS,
@@ -2619,6 +2625,12 @@ void RsPanelV3Slave_OnButtonSample(void)
                 s_hold_start_sp_cd = 1u;
                 s_hold_start_sp_cd_ms = 0u;
                 s_hold_start_sp_committed = 0u;
+                s_blink_on = 1u;
+                s_blink_last_ms = now;
+                Led_SetBrightness(LED_BUT_START_SP, LED_BUT_MAX_BRIGHTNESS);
+                Led_SetBrightness(LED_STR_START_SP, LED_BUT_MAX_BRIGHTNESS);
+                Led_Set(LED_BUT_START_SP, 1u);
+                Led_Set(LED_STR_START_SP, 1u);
                 rs_v3_start_hold_beep();
             } else if (s_hold_start_sp_ms < 0xFFF0u) {
                 s_hold_start_sp_ms = (uint16_t)(s_hold_start_sp_ms + 10u);
@@ -2631,7 +2643,13 @@ void RsPanelV3Slave_OnButtonSample(void)
                     s_hold_start_sp_committed = 1u;
                     Beeper_StopPattern();
                     rs_v3_restore_fault_beep_if_needed();
+                    rs_v3_restore_start_sp_idle_leds();
                     rs_v3_post_start_all_commit();
+                } else if ((now - s_blink_last_ms) >= RS_V3_BLINK_HALF_MS) {
+                    s_blink_last_ms = now;
+                    s_blink_on ^= 1u;
+                    Led_Set(LED_BUT_START_SP, s_blink_on);
+                    Led_Set(LED_STR_START_SP, s_blink_on);
                 }
             }
         } else if (s_hold_start_sp != 0u) {
@@ -2643,6 +2661,7 @@ void RsPanelV3Slave_OnButtonSample(void)
             s_hold_start_sp_committed = 0u;
             if (was_commit == 0u) {
                 rs_v3_restore_beep_after_hold_cancel();
+                rs_v3_restore_start_sp_idle_leds();
                 rs_v3_post_start_sp();
             }
         }
@@ -2861,7 +2880,16 @@ static void rs_v3_sync_status_leds(void)
     }
 
     if (fire != 0u) {
-        Led_Set(LED_FIRE, 1u);
+        /* ПОЖАР1 — мигание 1,5 Гц. ПОЖАР2 и остальные пожарные статусы —
+         * непрерывно. Пока ZONES нет — мигание ПОЖАР1, чтобы не показать
+         * ложный непрерывный ПОЖАР2. Смесь зон: достаточно одной не-FIRE1. */
+        uint8_t fire1;
+        if (s_zones.count == 0u || s_zones_valid == 0u) {
+            fire1 = 1u;
+        } else {
+            fire1 = rs_v3_zones_want_fire1();
+        }
+        Led_Set(LED_FIRE, (fire1 != 0u) ? LED_BLINK : 1u);
         Led_SetBrightness(LED_FIRE, LED_STATUS_MAX_BRIGHTNESS);
         Led_ForceStatusBright(LED_FIRE);
         /* LED_START — rs_v3_sync_fire_indication (тушение). */

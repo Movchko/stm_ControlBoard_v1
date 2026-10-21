@@ -42,6 +42,9 @@
 
 #define LED_POWER_TOOGLE_PERIOD_MS 2000
 
+/* Led_Set: 0 — погашен, 1 — непрерывно, LED_BLINK — мигание 1,5 Гц (ПОЖАР1). */
+#define LED_BLINK 2u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

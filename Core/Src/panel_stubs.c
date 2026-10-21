@@ -551,9 +551,8 @@ static uint8_t journal_has(uint32_t rec_idx)
 }
 
 /**
- * Ближайшая дыра к selected. Старт GET_N сдвигаем назад не больше чем на
- * (PREFETCH_N−1), чтобы ответ из 3 записей обязательно покрыл эту дыру
- * (иначе selected «Загрузка», а RS качает дальний край окна).
+ * Ближайшая дыра к selected. GET_N стартует с неё: в ответе на 200 байт
+ * первая запись всегда целая, следующие — только если тоже влезли без обрезки.
  */
 static uint8_t journal_pick_missing(uint32_t *out_idx)
 {
@@ -561,7 +560,6 @@ static uint8_t journal_pick_missing(uint32_t *out_idx)
 	uint32_t last;
 	uint32_t d;
 	uint32_t miss;
-	uint32_t start;
 	uint8_t found = 0u;
 
 	if (out_idx == 0 || g_journal_total == 0u) {
@@ -596,14 +594,7 @@ static uint8_t journal_pick_missing(uint32_t *out_idx)
 	if (found == 0u) {
 		return 0u;
 	}
-	/* start..start+N-1 должно включать miss → назад максимум на N-1. */
-	start = miss;
-	while (start > first &&
-	       journal_has(start - 1u) == 0u &&
-	       (miss - start + 1u) < (uint32_t)PANEL_JOURNAL_PREFETCH_N) {
-		start--;
-	}
-	*out_idx = start;
+	*out_idx = miss;
 	return 1u;
 }
 

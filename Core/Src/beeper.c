@@ -95,6 +95,8 @@ static uint16_t s_beeper_test_stop_ticks = 0u;
 static uint8_t s_beeper_test_bursts_left = 0u;
 /* Временный звук при mute (клик кнопки / тест индикации). */
 static uint8_t s_sound_override = 0u;
+/* Удержание ПУСК ОБЩИЙ / ПУСК СП: звук обязателен даже при mute. */
+static uint8_t s_hold_force_audible = 0u;
 /* GOST: unmute по новому событию — не дать POLL с SOUND_ON=0 сразу заглушить. */
 static uint8_t s_gost_resume_hold = 0u;
 
@@ -105,7 +107,8 @@ static uint8_t Beeper_TestModeBlocksExternal(void)
 
 static uint8_t Beeper_IsAudible(void)
 {
-	if (s_beeper_test_api != 0u || s_sound_override != 0u) {
+	if (s_beeper_test_api != 0u || s_sound_override != 0u ||
+	    s_hold_force_audible != 0u) {
 		return 1u;
 	}
 	return (beep_sound != 0u) ? 1u : 0u;
@@ -226,7 +229,7 @@ static void Beeper_Tim6Configure(void)
 static void Beeper_DacWrite(uint32_t level)
 {
 	//TODO DELETE  return;
-	//return;
+	//eturn;
 
 	if (level > SOUND_DAC_LEVEL_MAX) {
 		level = SOUND_DAC_LEVEL_MAX;
@@ -677,7 +680,7 @@ void Beeper_ContinuousOn(void)
 	beeper_state = BEEPER_STATE_CONTINUOUS;
 	beeper_counter = 0;
 	beep_phase = 0;
-	Beeper_SetNoteHz(NOTE_C7);
+	Beeper_SetNoteHz(SOUND_FIRE_TONE_HZ);
 	Beeper_On();
 }
 
@@ -689,11 +692,13 @@ void Beeper_FireAlarmOn(void)
 	if (Beeper_IsAudible() == 0u) {
 		return;
 	}
-	/* Непрерывный тон на резонансе KPEG116 (2.0 kHz) — максимум громкости. */
+	/* Непрерывный тон на резонансе KPEG116 (2.0 kHz) — максимум громкости.
+	 * 100 %: пип кнопки оставляет 80 %, ToneStart сам амплитуду не поднимает. */
 	g_resume_ctx.valid = 0u;
 	beeper_state = BEEPER_STATE_CONTINUOUS;
 	beeper_counter = 0;
 	beep_phase = 0;
+	s_tone_volume_pct = 100u;
 	Beeper_SetNoteHz(SOUND_FIRE_TONE_HZ);
 	Beeper_On();
 }
@@ -730,6 +735,7 @@ void Beeper_StopPattern(void)
 	/* Сбрасываем resume всегда: SOUND_OFF мог прийти во время BTN_ACK (LONG_BEEP),
 	 * когда state != PATTERN — иначе после клика снова стартует START_ALL_HOLD. */
 	g_resume_ctx.valid = 0u;
+	s_hold_force_audible = 0u;
 	if (beeper_state == BEEPER_STATE_PATTERN) {
 		beeper_state = BEEPER_STATE_IDLE;
 		Beeper_Off();
@@ -752,6 +758,7 @@ void Beeper_AllOff(void)
 		beep_sound = s_ind_saved_mute;
 	}
 	g_resume_ctx.valid = 0u;
+	s_hold_force_audible = 0u;
 	beeper_state = BEEPER_STATE_IDLE;
 	pattern_repeat_ticks = 0u;
 	pattern_pulses_left = 0u;
@@ -831,11 +838,15 @@ void Beeper_StartupBeep(void)
 	s_sound_override = saved_override;
 }
 
-void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms)
+static void Beeper_StartPulseTrainInternal(uint16_t pulse_on_ms, uint16_t pulse_off_ms,
+					  uint8_t pulses, uint16_t repeat_period_ms,
+					  uint8_t hold_force)
 {
 	if (Beeper_TestModeBlocksExternal() != 0u) {
 		return;
 	}
+	/* hold_force до IsAudible/ToneStart: иначе mute глушит удержание. */
+	s_hold_force_audible = (hold_force != 0u) ? 1u : 0u;
 	if (Beeper_IsAudible() == 0u) {
 		return;
 	}
@@ -853,8 +864,19 @@ void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t
 	pattern_counter = pattern_on_ticks;
 	pattern_repeat_counter = 0u;
 	beeper_state = BEEPER_STATE_PATTERN;
-	Beeper_SetNoteHz(NOTE_B6);
+	Beeper_SetNoteHz(SOUND_FIRE_TONE_HZ);
 	Beeper_On();
+}
+
+void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms)
+{
+	Beeper_StartPulseTrainInternal(pulse_on_ms, pulse_off_ms, pulses, repeat_period_ms, 0u);
+}
+
+void Beeper_StartHoldPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms)
+{
+	/* Mute не глушит удержание ПУСК ОБЩИЙ / ПУСК СП (малая, сценарий общего пуска). */
+	Beeper_StartPulseTrainInternal(pulse_on_ms, pulse_off_ms, pulses, repeat_period_ms, 1u);
 }
 
 void Beeper_ButtonAcknowledge(void)
@@ -979,8 +1001,8 @@ void Beeper_TestPlay(uint8_t profile_id)
 
 	switch ((BeeperTestProfile_t)profile_id) {
 	case BEEPER_TEST_PROFILE_FIRE1_SIGNAL:
-		Beeper_StartPulseTrain(SOUND_FIRE1_SIGNAL_ON_MS, SOUND_FIRE1_SIGNAL_OFF_MS,
-		                       SOUND_FIRE1_SIGNAL_PULSES, SOUND_FIRE1_SIGNAL_REPEAT_MS);
+		/* Тот же непрерывный тон, что и ПОЖАР2. */
+		Beeper_FireAlarmOn();
 		Beeper_TestArmStopMs(10000u);
 		break;
 	case BEEPER_TEST_PROFILE_FIRE1_DUTY:
@@ -1188,8 +1210,11 @@ void Beeper_SoundOnOff(bool soundOn) {
 		s_sound_override = 0u;
 		s_ack_cooldown_ticks = 0u;
 		g_resume_ctx.valid = 0u;
-		beeper_state = BEEPER_STATE_IDLE;
-		Beeper_Off();
+		/* Удержание ПУСК ОБЩИЙ / ПУСК СП продолжает звучать при mute. */
+		if (s_hold_force_audible == 0u) {
+			beeper_state = BEEPER_STATE_IDLE;
+			Beeper_Off();
+		}
 	}
 	/* Кэш/меню всегда = фактический mute (иначе POLL «выкл» + Beeper_SoundOnOff(true)
 	 * из main оставляют клики слышными при «Откл» в меню). */

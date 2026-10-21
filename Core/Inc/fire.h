@@ -48,8 +48,8 @@ uint8_t Fire_IsStartAllHoldActive(void);
 /* Активен звук/индикация тушения (ПУСК непрерывно на панели). */
 uint8_t Fire_IsExtinguishIndicationActive(void);
 
-/* Режим обобщённого LED_FIRE для панели:
- * 0 = OFF, 1 = ПОЖАР1 (непрерывно), 2 = ПОЖАР2 (мигание), 3 = ВНИМАНИЕ (мигание). */
+/* Не используется: лампу ПОЖАР ведёт rs_v3_sync_status_leds
+ * (ПОЖАР1 — LED_BLINK 1,5 Гц, ПОЖАР2 — непрерывно). */
 uint8_t Fire_GetPanelFireLedMode(void);
 
 /* Ручной выбор пожара на главном экране (индекс в текущем UI-списке). */

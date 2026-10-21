@@ -107,6 +107,11 @@ void Beeper_Process(void);
 void Beeper_PlayOneShotMs(uint16_t duration_ms);
 void Beeper_StartupBeep(void);
 void Beeper_StartPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms);
+/**
+ * @brief Звук удержания ПУСК ОБЩИЙ / ПУСК СП (малая): играет даже при mute.
+ * Снимается Beeper_StopPattern / Beeper_AllOff.
+ */
+void Beeper_StartHoldPulseTrain(uint16_t pulse_on_ms, uint16_t pulse_off_ms, uint8_t pulses, uint16_t repeat_period_ms);
 /* Короткий клик кнопки без потери фонового дежурного паттерна. */
 void Beeper_ButtonAcknowledge(void);
 
