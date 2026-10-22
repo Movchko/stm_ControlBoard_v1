@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "menu_ui.h"
+#include "rs_panel_v3_slave.h"
 }
 
 static FrontendApplication& panel_ui_app()
@@ -31,7 +32,10 @@ extern "C" void PanelUiBridge_GotoScreen(uint16_t screen_id, uint8_t action)
         panel_ui_app().gotoscreen_logoScreenNoTransition();
         break;
     case RS_PANEL_SCREEN_MAIN:
-        MenuUi_SetConfigSession(0u);
+        /* Во время конфигурации с ПО оверлей % живёт на главном — сессию не сбрасывать. */
+        if (RsPanelV3Slave_IsConfigActive() == 0u) {
+            MenuUi_SetConfigSession(0u);
+        }
         MenuUi_SetMenuSessionScreen(0u);
         /* main=1 ставит только реальный переход (не rs_queue_nav), иначе сюда
          * пришли бы с main=1 ещё на экране меню и переход бы пропустился. */

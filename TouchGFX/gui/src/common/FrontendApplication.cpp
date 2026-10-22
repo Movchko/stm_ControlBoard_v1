@@ -30,6 +30,7 @@
 #include "rs_panel_endpoint.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_protocol.h"
+#include "rs_panel_v3_slave.h"
 #endif
 
 using namespace touchgfx;
@@ -56,6 +57,16 @@ void FrontendApplication::handleTickEvent()
             MenuUi_SetConfigSession(0u);
         }
         /* Через bridge: сразу MAIN для маршрута кнопок + current_screen. */
+        PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
+        FrontendApplicationBase::handleTickEvent();
+        RsPanelEndpoint_ProcessDeferredUi();
+        return;
+    }
+
+    /* Конфигурация с ПО: оверлей % на главном — выбросить из меню/подменю. */
+    if (RsPanelV3Slave_IsConfigActive() != 0u &&
+        (MenuUi_IsMainScreenActive() == 0u || MenuUi_GetMenuSessionScreen() != 0u)) {
+        MenuUi_SetMainScreenActive(0u);
         PanelUiBridge_GotoScreen(RS_PANEL_SCREEN_MAIN, RS_PANEL_UI_ACTION_REPLACE);
         FrontendApplicationBase::handleTickEvent();
         RsPanelEndpoint_ProcessDeferredUi();

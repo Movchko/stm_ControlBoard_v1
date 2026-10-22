@@ -8,8 +8,9 @@ HW_REVISION = "A"
 HW_VERSION = "1"
 FOOTER_RESERVED_SIZE = 44
 
-# Размер слота приложения (сектора) — см. boot_panel.h / линкер.
-APP_MAX_BYTES = 28 * 8 * 1024
+# Слот приложения: boot_panel.h PANEL_APP_SIZE_SECTORS=56, сектор 8K → 448K.
+# Футер лежит в отдельном секторе перед app (не внутри слота).
+APP_MAX_BYTES = 56 * 8 * 1024
 
 
 def _get_bin_data(bin_path: str) -> bytes:
@@ -70,9 +71,9 @@ def _calc_crc32(data: bytes, crc: int = 0x1111) -> int:
 
 
 def _add_footer_to_bin_data(bin_data: bytes) -> bytes:
-    if len(bin_data) > (APP_MAX_BYTES - 64):
+    if len(bin_data) > APP_MAX_BYTES:
         raise ValueError(
-            f"App too large: {len(bin_data)} bytes, max {APP_MAX_BYTES - 64}"
+            f"App too large: {len(bin_data)} bytes, max {APP_MAX_BYTES}"
         )
 
     data_crc32 = _calc_crc32(bin_data)

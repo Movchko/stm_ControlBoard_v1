@@ -51,6 +51,16 @@ void MenuUi_SetConnectionSelected(uint8_t idx);
 uint8_t MenuUi_GetConnectionSelected(void);
 void MenuUi_SetWifiBlocked(uint8_t blocked);
 uint8_t MenuUi_IsWifiBlocked(void);
+
+/* Меню «Связь»: логические id строк (0=WI-FI, 1=RS-485, …).
+ * При wifi_block строка WI-FI не входит в видимый список. */
+#define MENU_CONN_ID_WIFI   0u
+#define MENU_CONN_ID_RS485  1u
+#define MENU_CONN_ID_COUNT  2u
+uint8_t MenuUi_ConnIdIsVisible(uint8_t id);
+uint8_t MenuUi_ConnVisibleCount(void);
+uint8_t MenuUi_ConnVisibleToId(uint8_t vis_idx);
+uint8_t MenuUi_ConnIdToVisible(uint8_t id);
 void MenuConfig_SetRemoteStatus(MenuCfgState state, uint8_t percent);
 void PanelEspManager_SetRemoteStatus(uint8_t esp_enabled, uint8_t online, uint8_t host_connected, uint8_t session_active);
 void PanelConnectionCache_SetRemoteStatus(uint8_t user_wifi_on, uint8_t rs485_on);

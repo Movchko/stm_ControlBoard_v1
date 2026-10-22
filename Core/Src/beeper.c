@@ -1063,8 +1063,10 @@ void Beeper_Process(void)
 
 	Beeper_IndMelodyProcess();
 
+	/* Во время приёма/применения конфига глушим duty; на УСПЕХ — даём отыграть паттерн. */
 	if (s_beeper_test_mode == 0u &&
 	    MenuUi_IsConfigSessionActive() &&
+	    MenuConfig_GetState() != MENU_CFG_STATE_SUCCESS &&
 	    !Beeper_IsOneShotState(beeper_state) &&
 	    s_ind_melody_active == 0u) {
 		Beeper_Off();
@@ -1250,13 +1252,11 @@ void Beeper_SetSoundStateUiCallback(Beeper_SoundStateUiCallback cb)
 uint8_t Beeper_ResumeSoundOnNewEvent(void)
 {
 #if GOST_MODE
-	PanelHostCache *host = PanelHostCache_Get();
-
-	/* ГОСТ 7.6.1.13: после ручного отключения звука новое извещение снова включает звук. */
+	/* ГОСТ 7.6.1.13: после ручного отключения звука новое извещение
+	 * (неисправность / пожар) снова включает звук.
+	 * beep_block запрещает только смену с клавиатуры/меню (SOUND_SET),
+	 * а не авто-unmute на событие. */
 	if (beep_sound != 0u) {
-		return 0u;
-	}
-	if (host == 0 || host->beep_block != 0u) {
 		return 0u;
 	}
 	s_gost_resume_hold = 1u; /* до SYS_SOUND_ON=1 не принимать mute из POLL */

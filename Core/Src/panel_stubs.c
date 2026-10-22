@@ -234,6 +234,66 @@ uint8_t MenuUi_GetConnectionSelected(void) { return s_connection_selected; }
 void MenuUi_SetWifiBlocked(uint8_t blocked) { s_wifi_blocked = (blocked != 0u) ? 1u : 0u; }
 uint8_t MenuUi_IsWifiBlocked(void) { return s_wifi_blocked; }
 
+uint8_t MenuUi_ConnIdIsVisible(uint8_t id)
+{
+    if (id >= MENU_CONN_ID_COUNT) {
+        return 0u;
+    }
+    if (id == MENU_CONN_ID_WIFI && s_wifi_blocked != 0u) {
+        return 0u;
+    }
+    return 1u;
+}
+
+uint8_t MenuUi_ConnVisibleCount(void)
+{
+    uint8_t n = 0u;
+    uint8_t id;
+    for (id = 0u; id < MENU_CONN_ID_COUNT; id++) {
+        if (MenuUi_ConnIdIsVisible(id) != 0u) {
+            n++;
+        }
+    }
+    return (n != 0u) ? n : 1u;
+}
+
+uint8_t MenuUi_ConnVisibleToId(uint8_t vis_idx)
+{
+    uint8_t v = 0u;
+    uint8_t id;
+    for (id = 0u; id < MENU_CONN_ID_COUNT; id++) {
+        if (MenuUi_ConnIdIsVisible(id) == 0u) {
+            continue;
+        }
+        if (v == vis_idx) {
+            return id;
+        }
+        v++;
+    }
+    /* Fallback: первая видимая. */
+    for (id = 0u; id < MENU_CONN_ID_COUNT; id++) {
+        if (MenuUi_ConnIdIsVisible(id) != 0u) {
+            return id;
+        }
+    }
+    return MENU_CONN_ID_RS485;
+}
+
+uint8_t MenuUi_ConnIdToVisible(uint8_t id)
+{
+    uint8_t vis = 0u;
+    uint8_t i;
+    if (MenuUi_ConnIdIsVisible(id) == 0u) {
+        return 0u;
+    }
+    for (i = 0u; i < id; i++) {
+        if (MenuUi_ConnIdIsVisible(i) != 0u) {
+            vis++;
+        }
+    }
+    return vis;
+}
+
 void MenuUi_SetMenuSelected(uint16_t selected) { s_menu_selected = selected; }
 uint16_t MenuUi_GetMenuSelected(void) { return s_menu_selected; }
 void MenuUi_SetMenuNItems(uint8_t n_items) { s_menu_n_items = n_items; }

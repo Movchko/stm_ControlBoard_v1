@@ -77,6 +77,7 @@ static void rs_v3_dbg_sa_mark(uint8_t stage)
 static uint8_t s_sys_ready;
 static uint8_t s_fire_active;
 static uint8_t s_config_active;
+static uint8_t s_cfg_success_beep_done; /* 1 = УСПЕХ уже озвучен (не повторять каждый POLL) */
 static uint8_t s_has_faults;
 static uint8_t s_power_input_fault; /* SYS POWER_INPUT_FAULT → мигание LED_POWER */
 static uint16_t s_led_power_toggle_cnt; /* тики 10 мс; период = LED_POWER_TOOGLE_PERIOD_MS */
@@ -234,6 +235,7 @@ void RsPanelV3Slave_Init(void)
     s_sys_ready = 0u;
     s_fire_active = 0u;
     s_config_active = 0u;
+    s_cfg_success_beep_done = 0u;
     s_has_faults = 0u;
     s_power_input_fault = 0u;
     s_led_power_toggle_cnt = 0u;
@@ -1595,6 +1597,10 @@ static void rs_v3_format_fault_line(const RsPanelV3FaultEvtItem *fe,
     case RS_PANEL_V3_FAULT_PPKU_POWER_IN2: {
         /* extra: 1=ОБРЫВ, 2=НИЖЕ, 3=ВЫШЕ (как PPKU_INPUT_FAULT_* на ППКУ). */
         const char *kind_txt = "ОБРЫВ";
+        const unsigned pit =
+            (unsigned)(fe->code - RS_PANEL_V3_FAULT_PPKU_POWER_IN1 + 1u);
+        const char *power_zone = (pit == 1u) ? "ОСНОВНОЕ" : "РЕЗЕРВНОЕ";
+        char sn[ZONE_NAME_SIZE + 1];
         if ((fe->flags & RS_PANEL_V3_FAULT_FLAG_HAS_EXTRA) != 0u) {
             if (fe->extra == 2) {
                 kind_txt = "НИЖЕ";
@@ -1602,10 +1608,10 @@ static void rs_v3_format_fault_line(const RsPanelV3FaultEvtItem *fe,
                 kind_txt = "ВЫШЕ";
             }
         }
-        (void)snprintf(title, title_sz, "ПИТ%u. %s",
-                       (unsigned)(fe->code - RS_PANEL_V3_FAULT_PPKU_POWER_IN1 + 1u),
-                       kind_txt);
-        rs_v3_format_ppku_sn(fe, detail, detail_sz);
+        (void)snprintf(title, title_sz, "ПИТ%u. %s", pit, kind_txt);
+        /* Как имя зоны у неисправности МКУ: сначала ОСНОВНОЕ/РЕЗЕРВНОЕ, затем S/N. */
+        rs_v3_format_ppku_sn(fe, sn, (uint16_t)sizeof(sn));
+        (void)snprintf(detail, detail_sz, "%s %s", power_zone, sn);
         break;
     }
     case RS_PANEL_V3_FAULT_LINE_BREAK:
@@ -2196,6 +2202,14 @@ static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
                 }
             }
 
+            /* wifi_block с ППКУ → скрыть WI-FI в меню «Связь». */
+            MenuUi_SetWifiBlocked(
+                ((poll->sys.flags & RS_PANEL_V3_SYS_WIFI_BLOCKED) != 0u) ? 1u : 0u);
+            if (MenuUi_IsWifiBlocked() != 0u &&
+                MenuUi_GetConnectionSelected() == MENU_CONN_ID_WIFI) {
+                MenuUi_SetConnectionSelected(MENU_CONN_ID_RS485);
+            }
+
             /* Значок WiFi: POLL SYS. Пока WIFI_SET не подтверждён — не затирать
              * локальный «Вкл» кадром, собранным до обработки EVT. */
             if (s_event.seq == 0u || s_event.type != (uint8_t)RS_PANEL_V3_EVT_WIFI_SET) {
@@ -2224,16 +2238,27 @@ static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
                 /* Фон: последние 11 событий журнала (GET + GET_N×3). */
                 PanelJournalCache_OnSysReady();
             }
+            /* Старт конфигурации: глушим duty; с меню — на главный (оверлей %). */
+            if (prev_cfg == 0u && s_config_active != 0u) {
+                Beeper_StopPattern();
+                s_cfg_success_beep_done = 0u;
+                if (MenuUi_IsMainScreenActive() == 0u ||
+                    MenuUi_GetMenuSessionScreen() != 0u) {
+                    /* main=0 до перехода: иначе PanelUiBridge пропустит GotoScreen(MAIN). */
+                    MenuUi_SetMainScreenActive(0u);
+                    RsPanelEndpoint_QueueGotoMain();
+                }
+            }
             /* Сессия конфигурации закончилась — снять оверлей (иначе tick блочит UI). */
             if (prev_cfg != 0u && s_config_active == 0u && poll->has_config == 0u) {
                 MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, 0u);
+                s_cfg_success_beep_done = 0u;
             }
         }
     }
 
-    if (s_fire_active != 0u || s_config_active != 0u) {
-        MenuUi_SetMainScreenActive(1u);
-    }
+    /* Не ставить main=1 безусловно: при уходе с меню QueueGotoMain/bridge
+     * выставят флаг на реальном переходе; иначе GotoScreen(MAIN) пропускается. */
 
     if (poll->has_time != 0u) {
         RTC_TimeTypeDef time = {0};
@@ -2321,15 +2346,23 @@ static void rs_v3_apply_poll_body(const RsPanelV3Poll *poll)
 
     if (poll->has_config != 0u) {
         if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_SUCCESS) {
-            Beeper_StartPulseTrain(100u, 100u, 3u, 0u);
+            /* Один раз на фронт УСПЕХ: повторный StartPulseTrain каждый POLL давал хруст. */
+            if (s_cfg_success_beep_done == 0u) {
+                Beeper_StopPattern();
+                Beeper_StartPulseTrain(100u, 100u, 3u, 0u);
+                s_cfg_success_beep_done = 1u;
+            }
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_SUCCESS, 100u);
         } else if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_FAIL) {
+            s_cfg_success_beep_done = 0u;
             Beeper_StartPulseTrain(SOUND_FAULT_DUTY_ON_MS, SOUND_FAULT_DUTY_OFF_MS,
                                    SOUND_FAULT_DUTY_PULSES, 0u);
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, poll->config.percent);
         } else if (poll->config.phase == (uint8_t)RS_PANEL_V3_CFG_RUNNING) {
+            s_cfg_success_beep_done = 0u;
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_RECEIVING, poll->config.percent);
         } else {
+            s_cfg_success_beep_done = 0u;
             MenuConfig_SetRemoteStatus(MENU_CFG_STATE_IDLE, 0u);
         }
     }
@@ -2767,7 +2800,7 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
         } else if (screen == RS_PANEL_SCREEN_MENU_CONNECTION &&
                    ue->evt_type == (uint8_t)RS_PANEL_UI_EVT_CONFIRM) {
             uint8_t sel = MenuUi_GetConnectionSelected();
-            if (sel == 0u) {
+            if (sel == MENU_CONN_ID_WIFI) {
                 uint8_t on = (EspManager_IsUserWifiOn() != 0u) ? 0u : 1u;
                 /* Оптимистично: «Вкл/Выкл» и мигание значка до следующего POLL. */
                 if (MenuUi_IsWifiBlocked() == 0u) {
@@ -2778,7 +2811,7 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
                     PanelEspManager_SetRemoteStatus(session, host, host, session);
                     (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_WIFI_SET, 0u, on, 0u, 0u);
                 }
-            } else {
+            } else if (sel == MENU_CONN_ID_RS485) {
                 uint8_t on = (PanelHostCache_GetConst()->rs485_on != 0u) ? 0u : 1u;
                 PanelConnectionCache_SetRemoteStatus(EspManager_IsUserWifiOn(), on);
                 (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_EXT_CAN_SET, 0u, on, 0u, 0u);
