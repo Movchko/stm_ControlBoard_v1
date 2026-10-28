@@ -26,6 +26,8 @@ uint16_t RsPanelV3Slave_BuildRsp(uint8_t *dst, uint16_t dst_size);
 uint8_t RsPanelV3Slave_IsSysReady(void);
 uint8_t RsPanelV3Slave_HasFaults(void);
 uint8_t RsPanelV3Slave_IsFireActive(void);
+/** Выбранная CAN-зона пожара (browse); 0 = все / вне выбора. */
+uint8_t RsPanelV3Slave_GetSelectedZone(void);
 uint8_t RsPanelV3Slave_IsConfigActive(void);
 uint8_t RsPanelV3Slave_IsHoldActive(void);
 /** Секунды UI-таймера: ПУСК ОБЩИЙ или countdown ПУСК СП (малая), 0 если нет. */

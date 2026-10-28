@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "Display/display.h"
+#include "gost_mode.h"
 #include "menu_ui.h"
 #include "panel_app.h"
 #include "panel_cfg.h"
@@ -196,6 +197,15 @@ static void panel_state_push_menu_root_ui_event(PanelStateContext *ctx, uint8_t 
     }
 
     const uint16_t sel = MenuUi_GetMenuSelected();
+#if GOST_MODE
+    /* Как ScreenMenuPresenter::menuActionIndex: logical 0..5 → action 1..6
+     * (без глобального «РЕЖИМ»). Drain ждёт action: 3=журнал, 4=устройства,
+     * 5=режим зон (ZONE_BLOCK_LIST). Иначе «ТЕСТ» (logical 5) ошибочно
+     * запрашивал LIST и подтягивал zone_fire_mode с ППКУ → АВТ.ОТКЛ/ПУСК БЛОК. */
+    const uint16_t action = (uint16_t)(sel + 1u);
+#else
+    const uint16_t action = sel;
+#endif
 
     switch (btn) {
     case BUT_ESC:
@@ -209,7 +219,7 @@ static void panel_state_push_menu_root_ui_event(PanelStateContext *ctx, uint8_t 
         panel_state_push_ui(ctx, RS_PANEL_UI_EVT_NAV, 1u, sel);
         break;
     case BUT_ENTER:
-        panel_state_push_ui(ctx, RS_PANEL_UI_EVT_MENU_SELECT, sel, 0u);
+        panel_state_push_ui(ctx, RS_PANEL_UI_EVT_MENU_SELECT, action, 0u);
         break;
     default:
         break;

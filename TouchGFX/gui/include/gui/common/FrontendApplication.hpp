@@ -51,6 +51,10 @@ private:
 #ifndef SIMULATOR
     static const int NUM_BUTTONS = 7;
     uint8_t prevButtonStates[NUM_BUTTONS];
+    /* ESC при активном пожаре на MAIN: short — на отпускании; hold 3с — блок пуска. */
+    uint8_t escHoldActive;
+    uint8_t escHoldCommitted;
+    uint32_t escHoldFromMs;
 #endif
 };
 

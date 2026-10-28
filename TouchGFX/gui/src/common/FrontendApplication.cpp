@@ -24,12 +24,14 @@
 #include <touchgfx/transitions/NoTransition.hpp>
 
 #ifndef SIMULATOR
+#include "main.h"
 #include "button.h"
 #include "fire.h"
 #include "menu_ui.h"
 #include "rs_panel_endpoint.h"
 #include "panel_ui_bridge.h"
 #include "rs_panel_protocol.h"
+#include "rs_panel_protocol_v3.h"
 #include "rs_panel_v3_slave.h"
 #endif
 
@@ -41,6 +43,9 @@ FrontendApplication::FrontendApplication(Model& m, FrontendHeap& heap)
 #ifndef SIMULATOR
     for (int i = 0; i < NUM_BUTTONS; i++)
         prevButtonStates[i] = 0;
+    escHoldActive = 0u;
+    escHoldCommitted = 0u;
+    escHoldFromMs = 0u;
 #endif
 }
 
@@ -76,11 +81,48 @@ void FrontendApplication::handleTickEvent()
     ModelListener* listener = model.getModelListener();
     if (listener)
     {
+        const uint8_t esc_fire_hold =
+            (Fire_IsActive() != 0u && MenuUi_IsMainScreenActive() != 0u) ? 1u : 0u;
         for (int but = 0; but < NUM_BUTTONS; but++)
         {
             uint8_t st = (uint8_t)Button_GetState((uint8_t)but);
-            if (st == (uint8_t)ButtonStatePress && prevButtonStates[but] != (uint8_t)ButtonStatePress)
-                listener->handleButton((uint8_t)but, st);
+            if (but == BUT_ESC && esc_fire_hold != 0u) {
+                const uint8_t down =
+                    (st == (uint8_t)ButtonStatePress ||
+                     st == (uint8_t)ButtonStateLongPress) ? 1u : 0u;
+                if (down != 0u) {
+                    if (escHoldActive == 0u) {
+                        escHoldActive = 1u;
+                        escHoldCommitted = 0u;
+                        escHoldFromMs = HAL_GetTick();
+                    } else if (escHoldCommitted == 0u &&
+                               (HAL_GetTick() - escHoldFromMs) >= 3000u) {
+                        escHoldCommitted = 1u;
+                        (void)RsPanelV3Slave_PostEvent(
+                            (uint8_t)RS_PANEL_V3_EVT_FIRE_LAUNCH_BLOCK,
+                            RsPanelV3Slave_GetSelectedZone(), 0u, 0u, 0u);
+                    }
+                } else {
+                    if (escHoldActive != 0u && escHoldCommitted == 0u) {
+                        /* Short ESC только на отпускании — иначе browse сорвётся до hold. */
+                        listener->handleButton((uint8_t)BUT_ESC,
+                                               (uint8_t)ButtonStatePress);
+                    }
+                    escHoldActive = 0u;
+                    escHoldCommitted = 0u;
+                    escHoldFromMs = 0u;
+                }
+            } else {
+                if (but == BUT_ESC) {
+                    escHoldActive = 0u;
+                    escHoldCommitted = 0u;
+                    escHoldFromMs = 0u;
+                }
+                if (st == (uint8_t)ButtonStatePress &&
+                    prevButtonStates[but] != (uint8_t)ButtonStatePress) {
+                    listener->handleButton((uint8_t)but, st);
+                }
+            }
             prevButtonStates[but] = st;
         }
     }

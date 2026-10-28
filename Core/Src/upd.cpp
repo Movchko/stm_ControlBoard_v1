@@ -14,7 +14,7 @@
 #include <stdio.h>
 
 /* fw_updater / stm_loader читают это имя из файла. */
-#define APP_VERSION_U32 7u
+#define APP_VERSION_U32 13u
 
 static volatile uint8_t g_enter_bootloader_pending = 0u;
 

@@ -21,12 +21,12 @@
 #include <string.h>
 #include <stdio.h>
 
-extern void SaveConfig(void);
 
 #define RS_V3_HOLD_START_ALL_MS     3000u /* ПУСК ОБЩИЙ: отсчёт на экране */
 #define RS_V3_SP_ARM_MS             2000u /* ПУСК СП (большая): hold ≥2с → без EVT */
 #define RS_V3_SP_COUNTDOWN_MS       3000u /* ПУСК СП (малая): отсчёт = как ОБЩИЙ */
 #define RS_V3_HOLD_FIRE_RESET_MS    5000u /* ОСТАНОВ: сброс пожара */
+#define RS_V3_HOLD_FIRE_BLOCK_MS    3000u /* ESC: блок пуска активного пожара */
 #define RS_V3_BLINK_HALF_MS         800u
 /* После последнего ZONE/DEV TLV — сохранить Flash (не на каждый POLL). */
 #define RS_V3_CATALOG_FLASH_QUIET_MS 400u
@@ -292,6 +292,7 @@ uint8_t RsPanelV3Slave_HasFaults(void)
 {
     return (s_has_faults != 0u || s_active_fault_count > 0u) ? 1u : 0u;
 }
+uint8_t RsPanelV3Slave_GetSelectedZone(void) { return s_selected_zone; }
 uint8_t RsPanelV3Slave_IsFireActive(void) { return s_fire_active; }
 uint8_t RsPanelV3Slave_IsConfigActive(void) { return s_config_active; }
 uint8_t RsPanelV3Slave_IsHoldActive(void)
@@ -331,7 +332,8 @@ static uint8_t rs_v3_evt_is_fire_ctrl(uint8_t type)
     return (type == (uint8_t)RS_PANEL_V3_EVT_START_SP ||
             type == (uint8_t)RS_PANEL_V3_EVT_STOP_LAUNCH ||
             type == (uint8_t)RS_PANEL_V3_EVT_START_ALL_COMMIT ||
-            type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET) ? 1u : 0u;
+            type == (uint8_t)RS_PANEL_V3_EVT_FIRE_RESET ||
+            type == (uint8_t)RS_PANEL_V3_EVT_FIRE_LAUNCH_BLOCK) ? 1u : 0u;
 }
 
 static void rs_v3_evt_next_seq(uint8_t *out_seq)
@@ -566,6 +568,37 @@ uint8_t RsPanelV3Slave_PostEvent(uint8_t type, uint8_t zone, uint8_t u8_a,
 {
     if (type == (uint8_t)RS_PANEL_V3_EVT_NONE) {
         return 0u;
+    }
+
+    /* ESC hold: сразу обновить локальный кэш режимов — иначе АВТ.ОТКЛ/ПУСК БЛОК
+     * всплывут только после ZONE_BLOCK_LIST (ошибочно при входе в «ТЕСТ» в GOST). */
+    if (type == (uint8_t)RS_PANEL_V3_EVT_FIRE_LAUNCH_BLOCK) {
+        uint8_t zi;
+        for (zi = 0u; zi < 32u; zi++) {
+            if (PanelHostCache_GetConst()->zone_name[zi][0] == 0) {
+                continue;
+            }
+            if (zone != 0u && (uint8_t)(zi + 1u) != zone) {
+                continue;
+            }
+            /* Только зоны с активным пожаром на UI; иначе mode=3 на всех именованных. */
+            if (s_fire_active != 0u && s_zones_valid != 0u) {
+                uint8_t j;
+                uint8_t hit = 0u;
+                for (j = 0u; j < s_zones.count && j < RS_PANEL_V3_MAX_ZONES; j++) {
+                    if (s_zones.items[j].zone == (uint8_t)(zi + 1u)) {
+                        hit = 1u;
+                        break;
+                    }
+                }
+                if (hit == 0u) {
+                    continue;
+                }
+            }
+            PPKY_ZoneFireModeSet(zi, 3u);
+            PPKY_ZoneModeUiNotify(zi);
+        }
+        rs_v3_sync_led_stop_status();
     }
 
     if (rs_v3_evt_is_fire_ctrl(type) != 0u) {
@@ -1658,6 +1691,20 @@ static void rs_v3_format_fault_line(const RsPanelV3FaultEvtItem *fe,
     case RS_PANEL_V3_FAULT_PANEL_JOURNAL:
         (void)snprintf(title, title_sz, "ЖУРНАЛ RS");
         (void)snprintf(detail, detail_sz, "ПАНЕЛЬ %u", (unsigned)fe->panel_addr);
+        break;
+    case RS_PANEL_V3_FAULT_PANEL_LINK:
+        (void)snprintf(title, title_sz, "НЕТ СВЯЗИ");
+        if ((fe->flags & RS_PANEL_V3_FAULT_FLAG_HAS_MCU) != 0u) {
+            (void)snprintf(detail, detail_sz,
+                           "ПАНЕЛЬ %u S/N:%08lX:%08lX:%08lX",
+                           (unsigned)fe->panel_addr,
+                           (unsigned long)fe->mcu.uid0,
+                           (unsigned long)fe->mcu.uid1,
+                           (unsigned long)fe->mcu.uid2);
+        } else {
+            (void)snprintf(detail, detail_sz, "ПАНЕЛЬ %u",
+                           (unsigned)fe->panel_addr);
+        }
         break;
     case RS_PANEL_V3_FAULT_DEVICE_MISSING:
         (void)snprintf(title, title_sz, "ОТСУСТВ.");
@@ -2838,9 +2885,9 @@ void RsPanelV3Slave_DrainPanelState(PanelStateContext *ctx)
             } else {
                 mode = 0u;
             }
+            /* Только runtime-кэш панели + EVT на ППКУ (там тоже без SaveConfig). */
             PPKY_ZoneFireModeSet(zi, mode);
             PPKY_ZoneModeUiNotify(zi);
-            SaveConfig();
             rs_v3_sync_led_stop_status();
             (void)RsPanelV3Slave_PostEvent(RS_PANEL_V3_EVT_ZONE_BLOCK_SET, zone, mode,
                                            0u, 0u);

@@ -150,6 +150,28 @@ static uint8_t fire_zone_remaining_at(uint8_t idx)
 	return 0u;
 }
 
+/* RS_PANEL_V3_ZONE_EXTINGUISHING = 2: среди пожаров стадия тушения важнее oldest-first. */
+static uint8_t fire_has_extinguishing(void)
+{
+	for (uint8_t i = 0u; i < s_fn_n; ++i) {
+		if (s_fn_modes[i] == 2u) {
+			return 1u;
+		}
+	}
+	return 0u;
+}
+
+/* Домашний индекс пожара: первый EXTINGUISHING в oldest-first списке, иначе 0. */
+static uint8_t fire_home_index(void)
+{
+	for (uint8_t i = 0u; i < s_fn_n; ++i) {
+		if (s_fn_modes[i] == 2u) {
+			return i;
+		}
+	}
+	return 0u;
+}
+
 static void ui_set_warning_header_visible(mainscreenView *view, bool visible);
 
 /* Шапка ДО ПУСКА/ПАУЗА из того же mode, что и центр — без лага ui_show_desired. */
@@ -237,7 +259,7 @@ static void fire_fill_center_text(uint8_t mode, uint8_t remaining_s, char *buf, 
 	} else if (mode == 7u) {
 		(void)snprintf(buf, buf_sz, "ТУШ.ОШ.");
 	} else if (mode == 8u) {
-		(void)snprintf(buf, buf_sz, "ПУСК БЛОК");
+		(void)snprintf(buf, buf_sz, "ПУСК ЗАБЛ.");
 	} else if (mode == 9u) {
 		(void)snprintf(buf, buf_sz, "ТУШ.ОСТ.");
 	} else if (remaining_s > 0u) {
@@ -359,9 +381,9 @@ static UiBannerMode ui_desired_banner(void)
 	if (s_pending_banner != BANNER_NONE) {
 		if (TickAgeExpiredMs(HAL_GetTick(), s_pending_from, NEW_EVENT_HOLD_MS) != 0u) {
 #if GOST_MODE
-			/* После 5 с вспышки нового пожара — снова первый пришедший. */
+			/* После 5 с вспышки — home: тушение (если есть) или первый пришедший. */
 			if (s_pending_banner == BANNER_FIRE && s_fn_n > 0u && !s_manual_browse) {
-				s_cur[BANNER_FIRE] = 0u;
+				s_cur[BANNER_FIRE] = fire_home_index();
 				s_gost_force_fire_redraw = 1u;
 			}
 #endif
@@ -681,11 +703,14 @@ void mainscreenView::fireShowCurrentZone()
 		s_cur[BANNER_FIRE] = 0u;
 	}
 #if GOST_MODE
-	/* ГОСТ: статус центра привязан к показываемой зоне (домашняя = первая пришедшая). */
-	if (!s_manual_browse &&
-	    !(s_pending_banner == BANNER_FIRE &&
-	      !TickAgeExpiredMs(HAL_GetTick(), s_pending_from, NEW_EVENT_HOLD_MS))) {
-		s_cur[BANNER_FIRE] = 0u;
+	/* ГОСТ: home = тушение (приоритет) или первый пришедший; flash не перебивает тушение. */
+	if (!s_manual_browse) {
+		if (fire_has_extinguishing() != 0u) {
+			s_cur[BANNER_FIRE] = fire_home_index();
+		} else if (!(s_pending_banner == BANNER_FIRE &&
+			     !TickAgeExpiredMs(HAL_GetTick(), s_pending_from, NEW_EVENT_HOLD_MS))) {
+			s_cur[BANNER_FIRE] = 0u;
+		}
 	}
 	Fire_UiSetManualSelection(1u, s_cur[BANNER_FIRE]);
 	{
@@ -1115,6 +1140,17 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		ui_clear_phase(BANNER_FIRE);
 		ui_invalidate_fire_marquee_cache();
 #if GOST_MODE
+		/* Пока идёт тушение — только его; flash других пожаров не показывать. */
+		if (fire_has_extinguishing() != 0u) {
+			const uint8_t home = fire_home_index();
+			if (!s_manual_browse && s_cur[BANNER_FIRE] != home) {
+				s_cur[BANNER_FIRE] = home;
+				s_gost_force_fire_redraw = 1u;
+			}
+			if (need_flash && s_fn_modes[flash_idx] != 2u) {
+				need_flash = false;
+			}
+		}
 		if (need_flash) {
 			ui_request_new_event(BANNER_FIRE, flash_idx);
 		}
@@ -1124,6 +1160,17 @@ void mainscreenView::updateFireStatus(bool active, uint8_t mode, uint8_t zone, u
 		}
 #endif
 	}
+#if GOST_MODE
+	/* Появление/уход стадии тушения без смены состава списка. */
+	if (active && !s_manual_browse && fire_has_extinguishing() != 0u) {
+		const uint8_t home = fire_home_index();
+		if (s_cur[BANNER_FIRE] != home) {
+			s_cur[BANNER_FIRE] = home;
+			s_pending_banner = BANNER_NONE;
+			s_gost_force_fire_redraw = 1u;
+		}
+	}
+#endif
 	if (!active) {
 		Fire_UiSetManualSelection(0u, 0u);
 		const bool leaving_fire = prev_active || (s_banner_mode == BANNER_FIRE);
